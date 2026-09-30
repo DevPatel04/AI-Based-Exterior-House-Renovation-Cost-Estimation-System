@@ -90,7 +90,7 @@ export default function ImageCropper({
           <Icon name="crop" className="h-4 w-4 text-brand-600" /> Frame the facade
         </h3>
         <p className="mt-0.5 text-sm text-slate-500">
-          Drag the box to frame the house and use the corner handle to resize. Quality checks run on the cropped view.
+          Drag the box to frame the house and use the corner handle to resize. Cropping is optional.
         </p>
       </div>
       <div className="flex justify-center rounded-lg bg-slate-900/90 p-2">

@@ -143,7 +143,7 @@ export default function ProjectWorkspacePage() {
   function chooseFile(file?: File | null) {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      toast.error("Please choose an image file (JPG, PNG or WebP).");
+      toast.error("Please choose an image file.");
       return;
     }
     setLastQuality(null);
@@ -152,16 +152,14 @@ export default function ProjectWorkspacePage() {
 
   async function uploadCropped(file: File, setPrimary = true) {
     setBusy(true);
-    setProgress("Uploading and checking image quality…");
+    setProgress("Uploading photo…");
     setPendingCrop(null);
     try {
       const img = await api.uploadImage(projectId, file, setPrimary);
-      setLastQuality({ ok: !!img.quality_ok, message: img.quality_message || "Uploaded" });
+      setLastQuality({ ok: true, message: img.quality_message || "Uploaded" });
       await refresh();
-      if (img.quality_ok) {
-        toast.success("Photo uploaded and passed quality checks.");
-        setStep(1);
-      }
+      toast.success("Photo uploaded.");
+      setStep(1);
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -537,7 +535,7 @@ export default function ProjectWorkspacePage() {
       {step === 0 && (
         <StepCard
           title="Upload exterior photo"
-          description="Use a clear, daytime photo of the facade taken straight on. You can crop to the usable view before automatic quality checks run. Add extra angles if helpful and choose one as primary."
+          description="Upload any photo of the facade (JPG, PNG, WebP, and other common formats). Cropping is optional. Soft tips may appear, but uploads are never blocked by size."
         >
           {lastQuality && (
             <Alert
@@ -587,7 +585,7 @@ export default function ProjectWorkspacePage() {
               <span className="mt-3 text-sm font-semibold text-slate-900">
                 {images.length ? "Add another photo" : "Choose a photo"} <span className="font-normal text-slate-500">or drag it here</span>
               </span>
-              <span className="mt-1 text-xs text-slate-500">JPG, PNG or WebP · you&apos;ll crop it next</span>
+              <span className="mt-1 text-xs text-slate-500">Any common image format · optional crop next</span>
             </label>
           )}
 
@@ -609,8 +607,10 @@ export default function ProjectWorkspacePage() {
                     <div className="space-y-2 p-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         {img.is_primary ? <Badge tone="brand">Primary</Badge> : <Badge>Extra angle</Badge>}
-                        {img.quality_ok === true && <Badge tone="success">Quality OK</Badge>}
-                        {img.quality_ok === false && <Badge tone="warning">Quality issue</Badge>}
+                        {img.quality_message && !img.quality_message.toLowerCase().includes("usable") && (
+                          <Badge tone="neutral">Tip</Badge>
+                        )}
+                        {img.quality_message?.toLowerCase().includes("usable") && <Badge tone="success">Ready</Badge>}
                       </div>
                       {img.quality_message && <p className="line-clamp-2 text-xs text-slate-500">{img.quality_message}</p>}
                       {!img.is_primary && (
