@@ -12,9 +12,11 @@ export default function ProfilePage() {
   const { refreshUser } = useAuth();
   const [me, setMe] = useState<any>(null);
   const [form, setForm] = useState({ full_name: "", phone: "", company: "" });
+  const [pw, setPw] = useState({ current_password: "", new_password: "", confirm: "" });
   const [logoUrl, setLogoUrl] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [changingPw, setChangingPw] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   async function load() {
@@ -49,6 +51,31 @@ export default function ProfilePage() {
       toast.error(err.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function onChangePassword(e: FormEvent) {
+    e.preventDefault();
+    if (pw.new_password.length < 6) {
+      toast.error("New password must be at least 6 characters.");
+      return;
+    }
+    if (pw.new_password !== pw.confirm) {
+      toast.error("New password and confirmation do not match.");
+      return;
+    }
+    setChangingPw(true);
+    try {
+      await api.changePassword({
+        current_password: pw.current_password,
+        new_password: pw.new_password,
+      });
+      setPw({ current_password: "", new_password: "", confirm: "" });
+      toast.success("Password updated.");
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setChangingPw(false);
     }
   }
 
@@ -135,6 +162,60 @@ export default function ProfilePage() {
             <button className="btn-primary" disabled={saving}>
               {saving && <Spinner />}
               {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        </form>
+      </Card>
+
+      <Card title="Change password" description="Use a strong password you don’t reuse elsewhere.">
+        <form onSubmit={onChangePassword} className="space-y-5">
+          <Field label="Current password" required>
+            {(id) => (
+              <input
+                id={id}
+                type="password"
+                className="input"
+                autoComplete="current-password"
+                value={pw.current_password}
+                onChange={(e) => setPw({ ...pw, current_password: e.target.value })}
+                required
+              />
+            )}
+          </Field>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <Field label="New password" required>
+              {(id) => (
+                <input
+                  id={id}
+                  type="password"
+                  className="input"
+                  autoComplete="new-password"
+                  minLength={6}
+                  value={pw.new_password}
+                  onChange={(e) => setPw({ ...pw, new_password: e.target.value })}
+                  required
+                />
+              )}
+            </Field>
+            <Field label="Confirm new password" required>
+              {(id) => (
+                <input
+                  id={id}
+                  type="password"
+                  className="input"
+                  autoComplete="new-password"
+                  minLength={6}
+                  value={pw.confirm}
+                  onChange={(e) => setPw({ ...pw, confirm: e.target.value })}
+                  required
+                />
+              )}
+            </Field>
+          </div>
+          <div className="flex justify-end border-t border-slate-100 pt-5">
+            <button className="btn-primary" disabled={changingPw}>
+              {changingPw && <Spinner />}
+              {changingPw ? "Updating…" : "Update password"}
             </button>
           </div>
         </form>

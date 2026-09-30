@@ -7,7 +7,7 @@ from app.api.deps import get_current_user, require_permission
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models import Role, User, UserRole
-from app.schemas import AssignRoleIn, Token, UserCreate, UserOut, UserUpdate
+from app.schemas import AssignRoleIn, PasswordChange, Token, UserCreate, UserOut, UserUpdate
 from app.services.storage import absolute_path, save_upload
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -84,6 +84,21 @@ def update_me(payload: UserUpdate, user: User = Depends(get_current_user), db: S
         .first()
     )
     return _user_out(user)
+
+
+@router.post("/me/password")
+def change_password(
+    payload: PasswordChange,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(payload.current_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=400, detail="New password must be different")
+    user.hashed_password = hash_password(payload.new_password)
+    db.commit()
+    return {"ok": True, "detail": "Password updated"}
 
 
 @router.post("/me/logo", response_model=UserOut)
