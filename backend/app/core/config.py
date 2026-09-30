@@ -44,7 +44,13 @@ class Settings(BaseSettings):
     @property
     def sqlalchemy_database_url(self) -> str:
         if self.database_url.strip():
-            return self.database_url.strip()
+            url = self.database_url.strip()
+            # Railway / Heroku often provide postgres:// — SQLAlchemy needs psycopg2 driver
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+            elif url.startswith("postgresql://") and "+psycopg2" not in url:
+                url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+            return url
         user = quote_plus(self.db_user)
         password = quote_plus(self.db_password)
         return (
