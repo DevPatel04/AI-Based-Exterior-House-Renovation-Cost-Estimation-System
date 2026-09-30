@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_current_user, require_permission
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models import Role, User, UserRole
+from app.models import Role, RoleName, User, UserRole
 from app.schemas import AssignRoleIn, PasswordChange, Token, UserCreate, UserOut, UserUpdate
-from app.services.storage import absolute_path, save_upload
+from app.services.storage import absolute_path, save_image_upload, save_upload
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -29,6 +29,9 @@ def _user_out(user: User) -> UserOut:
 
 @router.post("/register", response_model=UserOut)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
+    # Privileged roles must be assigned by an existing admin — never via public signup
+    if payload.role in {RoleName.admin}:
+        raise HTTPException(status_code=403, detail="Cannot self-register as admin")
     if db.query(User).filter(User.email == payload.email.lower()).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     role = db.query(Role).filter(Role.name == payload.role).first()
@@ -59,6 +62,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     user = db.query(User).filter(User.email == form_data.username.lower()).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account has been deactivated")
     token = create_access_token(str(user.id))
     return Token(access_token=token)
 
@@ -107,9 +112,10 @@ async def upload_logo(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if not (file.content_type or "").startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only image logos are allowed")
-    rel, _ = save_upload(file, "logos")
+    try:
+        rel, _ = await save_image_upload(file, "logos")
+    except Exception:
+        rel, _ = save_upload(file, "logos")
     user.logo_path = rel
     db.commit()
     user = (

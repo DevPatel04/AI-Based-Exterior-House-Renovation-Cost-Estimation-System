@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+from fastapi.concurrency import run_in_threadpool
+
 from app.core.config import get_settings
 from app.models import RegionType
 
@@ -57,7 +59,7 @@ def _extract_json(text: str) -> list | dict:
         raise
 
 
-async def gemini_quality_notes(image_path: Path) -> str | None:
+def _gemini_quality_notes_sync(image_path: Path) -> str | None:
     settings = get_settings()
     if not settings.gemini_api_key:
         return None
@@ -78,8 +80,11 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
         return None
 
 
-async def detect_structure_regions(image_path: Path) -> list[dict]:
-    """Use Gemini vision when configured; otherwise return editable default regions."""
+async def gemini_quality_notes(image_path: Path) -> str | None:
+    return await run_in_threadpool(_gemini_quality_notes_sync, image_path)
+
+
+def _detect_structure_regions_sync(image_path: Path) -> list[dict]:
     settings = get_settings()
     if not settings.gemini_api_key:
         return DEFAULT_REGIONS
@@ -125,6 +130,11 @@ Include major walls, windows, balconies, pillars, parapet, gate, roof edges if v
         return cleaned or DEFAULT_REGIONS
     except Exception:
         return DEFAULT_REGIONS
+
+
+async def detect_structure_regions(image_path: Path) -> list[dict]:
+    """Use Gemini vision when configured; otherwise return editable default regions."""
+    return await run_in_threadpool(_detect_structure_regions_sync, image_path)
 
 
 def build_redesign_prompt(material_summary: str) -> str:

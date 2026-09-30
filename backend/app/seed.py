@@ -94,6 +94,9 @@ MATERIALS = [
 
 
 def seed() -> None:
+    from app.core.config import get_settings
+
+    settings = get_settings()
     db = SessionLocal()
     try:
         for name, desc in ROLE_DEFS:
@@ -101,31 +104,45 @@ def seed() -> None:
                 db.add(Role(name=name, description=desc))
         db.commit()
 
-        admin_email = "admin@example.com"
+        admin_email = (settings.admin_email or "").strip().lower()
+        admin_password = (settings.admin_password or "").strip()
         legacy_email = "admin@renovation.local"
-        admin = db.query(User).filter(User.email == admin_email).first()
-        if not admin:
+
+        # Migrate legacy seed email if present
+        if admin_email:
             legacy = db.query(User).filter(User.email == legacy_email).first()
-            if legacy:
+            if legacy and not db.query(User).filter(User.email == admin_email).first():
                 legacy.email = admin_email
                 db.commit()
-                admin = legacy
                 print(f"Migrated admin email {legacy_email} → {admin_email}")
-        if not admin:
-            admin = User(
-                email=admin_email,
-                hashed_password=hash_password("admin123"),
-                full_name="System Admin",
-                company="House Renovation Platform",
-            )
-            db.add(admin)
-            db.flush()
-            admin_role = db.query(Role).filter(Role.name == RoleName.admin).first()
-            db.add(UserRole(user_id=admin.id, role_id=admin_role.id))
-            db.commit()
-            print(f"Created admin user: {admin_email} / admin123")
+
+        if admin_email and admin_password:
+            if settings.environment.lower() not in {"development", "dev", "test", "local"} and admin_password in {
+                "admin123",
+                "password",
+                "changeme",
+            }:
+                print("Skipping admin seed: weak ADMIN_PASSWORD not allowed outside development")
+            else:
+                admin = db.query(User).filter(User.email == admin_email).first()
+                if not admin:
+                    admin = User(
+                        email=admin_email,
+                        hashed_password=hash_password(admin_password),
+                        full_name="System Admin",
+                        company="House Renovation Platform",
+                    )
+                    db.add(admin)
+                    db.flush()
+                    admin_role = db.query(Role).filter(Role.name == RoleName.admin).first()
+                    if admin_role:
+                        db.add(UserRole(user_id=admin.id, role_id=admin_role.id))
+                    db.commit()
+                    print(f"Created admin user: {admin_email}")
+                else:
+                    print("Admin user already exists")
         else:
-            print("Admin user already exists")
+            print("Skipping admin seed (set ADMIN_EMAIL and ADMIN_PASSWORD to create one)")
 
         if db.query(Material).count() == 0:
             for m in MATERIALS:

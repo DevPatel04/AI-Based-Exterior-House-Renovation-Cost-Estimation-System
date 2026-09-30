@@ -95,7 +95,7 @@ def update_project(
     user: User = Depends(require_permission("project:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     if payload.title is not None:
         project.title = payload.title
     if payload.description is not None:
@@ -136,6 +136,10 @@ def share_project(
     target = db.query(User).filter(User.email == payload.user_email.lower()).first()
     if not target:
         raise HTTPException(status_code=404, detail="User email not found")
+    if target.id == project.owner_id:
+        raise HTTPException(status_code=400, detail="Cannot change the project owner's membership this way")
+    if payload.member_role == MemberRole.owner:
+        raise HTTPException(status_code=400, detail="Use project ownership transfer — cannot assign owner via share")
     existing = (
         db.query(ProjectMember)
         .filter(ProjectMember.project_id == project.id, ProjectMember.user_id == target.id)
@@ -184,3 +188,26 @@ def list_members(project_id: int, user: User = Depends(get_current_user), db: Se
         )
         for m in members
     ]
+
+
+@router.delete("/{project_id}/members/{member_user_id}")
+def remove_member(
+    project_id: int,
+    member_user_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _get_project_or_404(db, project_id, user)
+    if project.owner_id != user.id and "admin" not in get_user_role_names(user):
+        raise HTTPException(status_code=403, detail="Only owner/admin can remove members")
+    if member_user_id == project.owner_id:
+        raise HTTPException(status_code=400, detail="Cannot remove the project owner")
+    deleted = (
+        db.query(ProjectMember)
+        .filter(ProjectMember.project_id == project.id, ProjectMember.user_id == member_user_id)
+        .delete()
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Member not found")
+    db.commit()
+    return {"ok": True}

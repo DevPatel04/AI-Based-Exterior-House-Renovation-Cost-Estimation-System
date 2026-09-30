@@ -186,6 +186,12 @@ export default function ProjectWorkspacePage() {
   // Long-running actions below only run from their own step, so they don't call setStep on
   // completion — that would pull the user back if they navigated elsewhere meanwhile.
   async function detect() {
+    if (regions.length) {
+      const ok = window.confirm(
+        "Re-detect will replace auto-detected regions. Manually edited regions are kept. Continue?"
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     setProgress("Detecting structure regions (AI)… this can take a moment.");
     try {
@@ -213,10 +219,16 @@ export default function ProjectWorkspacePage() {
     setProgress("Saving materials…");
     try {
       const designId = await ensureDesign();
-      const items = Object.entries(assignments).map(([region_id, material_id]) => ({
-        region_id: Number(region_id),
-        material_id: Number(material_id),
-      }));
+      const items = Object.entries(assignments)
+        .filter(([, material_id]) => Number(material_id) > 0)
+        .map(([region_id, material_id]) => ({
+          region_id: Number(region_id),
+          material_id: Number(material_id),
+        }));
+      if (!items.length) {
+        toast.error("Select at least one material before saving.");
+        return;
+      }
       await api.assignMaterials(projectId, designId, items);
       await api.activateDesign(projectId, designId);
       await refresh();
@@ -235,6 +247,20 @@ export default function ProjectWorkspacePage() {
     setProgress(hq ? "Generating high-quality redesign (Gemini)…" : "Generating redesign…");
     try {
       const designId = await ensureDesign();
+      // Persist current assignments onto this design so Design B (etc.) gets its own materials/prompt
+      const items = Object.entries(assignments)
+        .filter(([, material_id]) => Number(material_id) > 0)
+        .map(([region_id, material_id]) => ({
+          region_id: Number(region_id),
+          material_id: Number(material_id),
+        }));
+      if (!items.length) {
+        toast.error("Assign materials and save them on this design before generating.");
+        setStep(2);
+        return;
+      }
+      await api.assignMaterials(projectId, designId, items);
+      await api.activateDesign(projectId, designId);
       await api.visualize(projectId, designId, hq);
       await refresh();
       setRedesignVersion((v) => v + 1);
@@ -275,8 +301,8 @@ export default function ProjectWorkspacePage() {
       const d = await api.createDesign(projectId, newDesignName || `Design ${designs.length + 1}`);
       setDesigns((prev) => [d, ...prev]);
       setActiveDesignId(d.id);
-      setAssignments({});
-      toast.success(`Created ${d.name}. Assign materials, then save.`);
+      // Keep current material picks as a starting point for the new variant (user can change them)
+      toast.success(`Created ${d.name}. Adjust materials if needed, save, then generate its redesign.`);
       setStep(2);
     } catch (err: any) {
       toast.error(err.message);
@@ -767,7 +793,15 @@ export default function ProjectWorkspacePage() {
                         id={selectId}
                         className="input"
                         value={assignments[r.id] || ""}
-                        onChange={(e) => setAssignments({ ...assignments, [r.id]: Number(e.target.value) })}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setAssignments((prev) => {
+                            const next = { ...prev };
+                            if (!v) delete next[r.id];
+                            else next[r.id] = Number(v);
+                            return next;
+                          });
+                        }}
                       >
                         <option value="">Select material</option>
                         {list.map((m) => (

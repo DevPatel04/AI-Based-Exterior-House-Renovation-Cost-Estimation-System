@@ -15,7 +15,6 @@ const ROLES: { value: string; label: string; description: string }[] = [
   { value: "builder", label: "Builder", description: "Review quantities and execution costs" },
   { value: "consultant", label: "Consultant", description: "Advise clients with branded reports" },
   { value: "supplier", label: "Material supplier", description: "List materials, rates and textures" },
-  { value: "admin", label: "Admin", description: "Manage users, roles and approvals" },
 ];
 
 export default function RegisterPage() {

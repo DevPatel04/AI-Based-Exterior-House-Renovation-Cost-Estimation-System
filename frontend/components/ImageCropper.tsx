@@ -128,6 +128,9 @@ export default function ImageCropper({
         <button type="button" className="btn-outline" onClick={onCancel}>
           Cancel
         </button>
+        <button type="button" className="btn-outline" onClick={() => onCropped(file)}>
+          Upload original
+        </button>
         <button type="button" className="btn-primary" onClick={applyCrop}>
           <Icon name="check" /> Apply crop & upload
         </button>
