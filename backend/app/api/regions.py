@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_permission
-from app.api.projects import _get_project_or_404
+from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
 from app.models import ProjectImage, RegionType, StructureRegion, User
 from app.schemas import RegionCreate, RegionOut, RegionUpdate
@@ -18,7 +18,7 @@ async def detect_regions(
     user: User = Depends(require_permission("regions:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     image = (
         db.query(ProjectImage)
         .filter(ProjectImage.project_id == project.id, ProjectImage.is_primary.is_(True))
@@ -28,8 +28,6 @@ async def detect_regions(
         image = db.query(ProjectImage).filter(ProjectImage.project_id == project.id).first()
     if not image:
         raise HTTPException(status_code=400, detail="Upload an exterior image first")
-    if image.quality_ok is False:
-        raise HTTPException(status_code=400, detail=image.quality_message or "Image quality not acceptable")
 
     detected = await detect_structure_regions(absolute_path(image.file_path))
     db.query(StructureRegion).filter(StructureRegion.project_id == project.id).delete()
@@ -64,7 +62,7 @@ def create_region(
     user: User = Depends(require_permission("regions:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     region = StructureRegion(
         project_id=project.id,
         region_type=payload.region_type,
@@ -87,7 +85,7 @@ def update_region(
     user: User = Depends(require_permission("regions:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     region = (
         db.query(StructureRegion)
         .filter(StructureRegion.id == region_id, StructureRegion.project_id == project.id)
@@ -115,7 +113,7 @@ def delete_region(
     user: User = Depends(require_permission("regions:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     region = (
         db.query(StructureRegion)
         .filter(StructureRegion.id == region_id, StructureRegion.project_id == project.id)
