@@ -8,7 +8,7 @@ from app.api import auth, designs, images, materials, projects, regions
 from app.core.config import get_settings
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.6.0")
+app = FastAPI(title=settings.app_name, version="0.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,5 +37,5 @@ def health():
     return {
         "status": "ok",
         "app": settings.app_name,
-        "phase": "06-materials-designs",
+        "phase": "07-visualization",
     }
