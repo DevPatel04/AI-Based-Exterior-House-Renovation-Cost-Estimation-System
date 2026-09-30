@@ -18,7 +18,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    role_name = sa.Enum(
+    # create_type=False: we create enums once below. Otherwise create_table
+    # emits a second CREATE TYPE and fails with DuplicateObject.
+    role_name = postgresql.ENUM(
         "homeowner",
         "contractor",
         "architect",
@@ -27,9 +29,12 @@ def upgrade() -> None:
         "supplier",
         "admin",
         name="role_name",
+        create_type=False,
     )
-    project_status = sa.Enum("draft", "designed", "estimated", "reported", name="project_status")
-    region_type = sa.Enum(
+    project_status = postgresql.ENUM(
+        "draft", "designed", "estimated", "reported", name="project_status", create_type=False
+    )
+    region_type = postgresql.ENUM(
         "main_wall",
         "window",
         "balcony",
@@ -40,8 +45,9 @@ def upgrade() -> None:
         "railing",
         "other",
         name="region_type",
+        create_type=False,
     )
-    material_type = sa.Enum(
+    material_type = postgresql.ENUM(
         "paint",
         "stone_cladding",
         "tiles",
@@ -51,14 +57,18 @@ def upgrade() -> None:
         "panels",
         "other",
         name="material_type",
+        create_type=False,
     )
-    member_role = sa.Enum("owner", "editor", "viewer", name="member_role")
+    member_role = postgresql.ENUM(
+        "owner", "editor", "viewer", name="member_role", create_type=False
+    )
 
-    role_name.create(op.get_bind(), checkfirst=True)
-    project_status.create(op.get_bind(), checkfirst=True)
-    region_type.create(op.get_bind(), checkfirst=True)
-    material_type.create(op.get_bind(), checkfirst=True)
-    member_role.create(op.get_bind(), checkfirst=True)
+    bind = op.get_bind()
+    role_name.create(bind, checkfirst=True)
+    project_status.create(bind, checkfirst=True)
+    region_type.create(bind, checkfirst=True)
+    material_type.create(bind, checkfirst=True)
+    member_role.create(bind, checkfirst=True)
 
     op.create_table(
         "users",
@@ -269,4 +279,4 @@ def downgrade() -> None:
     ]:
         op.drop_table(table)
     for enum_name in ["member_role", "material_type", "region_type", "project_status", "role_name"]:
-        sa.Enum(name=enum_name).drop(op.get_bind(), checkfirst=True)
+        postgresql.ENUM(name=enum_name, create_type=False).drop(op.get_bind(), checkfirst=True)
