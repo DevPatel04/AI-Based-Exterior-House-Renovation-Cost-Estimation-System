@@ -22,7 +22,7 @@ export function clearToken() {
   localStorage.removeItem("token");
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
