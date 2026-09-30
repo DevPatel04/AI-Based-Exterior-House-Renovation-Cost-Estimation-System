@@ -3,7 +3,14 @@ const nextConfig = {
   images: {
     remotePatterns: [
       { protocol: "http", hostname: "localhost", port: "8000", pathname: "/**" },
+      { protocol: "https", hostname: "*.up.railway.app", pathname: "/**" },
     ],
+  },
+  // Proxy /api/* → FastAPI so the browser never needs *.railway.internal
+  async rewrites() {
+    const backend = (process.env.BACKEND_URL || "").trim().replace(/\/$/, "");
+    if (!backend) return [];
+    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
   },
   // react-konva/konva optionally require Node `canvas` (native). Browser UI never needs it.
   // Do NOT npm install `canvas` — it fails on Railway without system libs.

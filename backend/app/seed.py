@@ -1,6 +1,6 @@
 """Seed roles, admin user, and sample materials/rates."""
 
-from app.core.database import SessionLocal, engine, Base
+from app.core.database import SessionLocal
 from app.core.security import hash_password
 from app.models import Material, MaterialType, Role, RoleName, User, UserRole
 
@@ -94,7 +94,6 @@ MATERIALS = [
 
 
 def seed() -> None:
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         for name, desc in ROLE_DEFS:

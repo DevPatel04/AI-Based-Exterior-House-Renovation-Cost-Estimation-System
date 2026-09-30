@@ -84,10 +84,14 @@ git push origin develop
 5. **Variables:**
 
 
-| Variable              | Value                                                           |
-| --------------------- | --------------------------------------------------------------- |
-| `NEXT_PUBLIC_API_URL` | your backend public URL, e.g. `https://api-xxxx.up.railway.app` |
-| `PORT`                | Railway sets this automatically — do not override               |
+| Variable              | Value |
+| --------------------- | ----- |
+| `NEXT_PUBLIC_API_URL` | **Public** backend URL only, e.g. `https://YOUR-API.up.railway.app`. **Never** use `*.railway.internal` (browsers cannot reach it). Or leave **empty** and use the proxy below. |
+| `BACKEND_URL`         | Optional. Server-side proxy target, e.g. `http://${{Backend.RAILWAY_PRIVATE_DOMAIN}}:${{Backend.PORT}}` or the same public API URL. Required if `NEXT_PUBLIC_API_URL` is empty. |
+| `PORT`                | Railway sets this automatically — do not override |
+
+**Important:** If the browser Network tab shows `*.railway.internal`, your `NEXT_PUBLIC_API_URL` is wrong. Fix it and **redeploy** the frontend (this value is baked in at build time).
+
 
 
 1. Generate domain for frontend.
@@ -132,8 +136,10 @@ API docs: `https://YOUR-API.up.railway.app/docs`
 ## Common Railway failures
 
 - **Application failed to respond:** app not listening on `0.0.0.0:$PORT` (frontend: use `./start.sh` / `npm run start`; backend: `./start.sh`). Also check deploy logs for crash on boot (migrate/DB).
+- **Register/API calls go to `*.railway.internal`:** set `NEXT_PUBLIC_API_URL` to the backend **public** `https://…up.railway.app` URL (or leave empty + set `BACKEND_URL` for proxy), then redeploy frontend.
+- **Seed / roles DatatypeMismatch:** ORM must use native PG enums (fixed); redeploy backend so seed inserts succeed.
 - **DB connection error:** ensure backend has `DATABASE_URL` from Postgres plugin; app auto-converts `postgres://` → `postgresql+psycopg2://`
-- **CORS blocked:** frontend URL missing from `CORS_ORIGINS`
+- **CORS blocked:** frontend URL missing from `CORS_ORIGINS` (not needed if using same-origin proxy)
 - **Images disappear after redeploy:** no volume on `/data/uploads`
 - **Frontend calls localhost:** `NEXT_PUBLIC_API_URL` not set at **build** time (set before build / redeploy)
 - **Wrong root:** monorepo must use Root Directory `backend` / `frontend`

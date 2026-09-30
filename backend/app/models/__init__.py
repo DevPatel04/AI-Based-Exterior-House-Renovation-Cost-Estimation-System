@@ -89,7 +89,7 @@ class Role(Base):
     __tablename__ = "roles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[RoleName] = mapped_column(Enum(RoleName, name="role_name", native_enum=False), unique=True, nullable=False)
+    name: Mapped[RoleName] = mapped_column(Enum(RoleName, name="role_name", native_enum=True), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(String(255))
 
     users: Mapped[list["UserRole"]] = relationship(back_populates="role")
@@ -114,7 +114,7 @@ class Project(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[ProjectStatus] = mapped_column(
-        Enum(ProjectStatus, name="project_status", native_enum=False), default=ProjectStatus.draft
+        Enum(ProjectStatus, name="project_status", native_enum=True), default=ProjectStatus.draft
     )
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -161,7 +161,7 @@ class ProjectMember(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     member_role: Mapped[MemberRole] = mapped_column(
-        Enum(MemberRole, name="member_role", native_enum=False), default=MemberRole.viewer
+        Enum(MemberRole, name="member_role", native_enum=True), default=MemberRole.viewer
     )
 
     project: Mapped[Project] = relationship(back_populates="members")
@@ -190,7 +190,7 @@ class StructureRegion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    region_type: Mapped[RegionType] = mapped_column(Enum(RegionType, name="region_type", native_enum=False), nullable=False)
+    region_type: Mapped[RegionType] = mapped_column(Enum(RegionType, name="region_type", native_enum=True), nullable=False)
     label: Mapped[str | None] = mapped_column(String(255))
     # Normalized polygon points [{x,y}, ...] in 0..1 image space
     points: Mapped[dict | list] = mapped_column(JSON, nullable=False)
@@ -207,7 +207,7 @@ class Material(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     material_type: Mapped[MaterialType] = mapped_column(
-        Enum(MaterialType, name="material_type", native_enum=False), nullable=False
+        Enum(MaterialType, name="material_type", native_enum=True), nullable=False
     )
     description: Mapped[str | None] = mapped_column(Text)
     unit: Mapped[str] = mapped_column(String(50), default="sq_ft")
@@ -277,7 +277,7 @@ class AreaEstimate(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     region_id: Mapped[int | None] = mapped_column(ForeignKey("structure_regions.id", ondelete="SET NULL"))
-    region_type: Mapped[RegionType] = mapped_column(Enum(RegionType, name="region_type", native_enum=False))
+    region_type: Mapped[RegionType] = mapped_column(Enum(RegionType, name="region_type", native_enum=True))
     area_sq_ft: Mapped[float] = mapped_column(Float, default=0.0)
     length_ft: Mapped[float | None] = mapped_column(Float)
     method: Mapped[str | None] = mapped_column(String(100))

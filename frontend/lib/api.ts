@@ -1,4 +1,21 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+/**
+ * Browser must never call Railway private hostnames (*.railway.internal).
+ * - Local: http://localhost:8000
+ * - Railway: leave NEXT_PUBLIC_API_URL empty and set BACKEND_URL for Next rewrites,
+ *   OR set NEXT_PUBLIC_API_URL to the backend's public https://*.up.railway.app URL.
+ */
+function resolveApiUrl(): string {
+  const raw = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, "");
+  if (raw.includes(".railway.internal")) {
+    return "";
+  }
+  if (raw) return raw;
+  // Empty NEXT_PUBLIC → same-origin (Next.js rewrites proxy to BACKEND_URL)
+  if (process.env.NODE_ENV === "production") return "";
+  return "http://localhost:8000";
+}
+
+const API_URL = resolveApiUrl();
 
 export type RoleName =
   | "homeowner"
@@ -22,6 +39,22 @@ export function clearToken() {
   localStorage.removeItem("token");
 }
 
+/** Turn FastAPI error payloads (string or 422 validation list) into a readable sentence. */
+function formatDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d: any) => {
+        if (!d || typeof d !== "object" || !d.msg) return null;
+        const field = Array.isArray(d.loc) ? d.loc.filter((p: unknown) => p !== "body").join(".") : "";
+        return field ? `${String(field).replace(/_/g, " ")}: ${d.msg}` : d.msg;
+      })
+      .filter(Boolean);
+    if (msgs.length) return msgs.join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 async function request<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   const token = getToken();
@@ -38,7 +71,7 @@ async function request<T = any>(path: string, options: RequestInit = {}): Promis
     } catch {
       /* ignore */
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new Error(formatDetail(detail));
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") || "";
@@ -180,5 +213,20 @@ export const api = {
   reportDownloadUrl: (projectId: number, reportId: number) =>
     `${API_URL}/api/projects/${projectId}/reports/${reportId}/download`,
 };
+
+/** Fetch a protected file with the bearer token and trigger a browser download. */
+export async function downloadAuthed(url: string, filename: string) {
+  const token = getToken();
+  const res = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!res.ok) throw new Error(`Download failed (${res.status})`);
+  const blobUrl = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
 
 export { API_URL };
