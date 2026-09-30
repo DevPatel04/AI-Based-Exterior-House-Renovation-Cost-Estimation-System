@@ -31,6 +31,11 @@ class UserUpdate(BaseModel):
     company: str | None = None
 
 
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=6)
+
+
 class RoleOut(BaseModel):
     id: int
     name: RoleName

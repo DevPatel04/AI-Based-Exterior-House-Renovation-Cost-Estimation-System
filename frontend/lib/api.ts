@@ -97,6 +97,8 @@ export const api = {
   me: () => request<any>("/api/auth/me"),
   updateMe: (body: object) =>
     request("/api/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
+  changePassword: (body: { current_password: string; new_password: string }) =>
+    request("/api/auth/me/password", { method: "POST", body: JSON.stringify(body) }),
   uploadLogo: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
