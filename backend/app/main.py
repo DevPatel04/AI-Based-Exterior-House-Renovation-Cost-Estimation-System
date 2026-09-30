@@ -4,11 +4,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, images, projects
+from app.api import auth, images, projects, regions
 from app.core.config import get_settings
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.4.0")
+app = FastAPI(title=settings.app_name, version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +27,7 @@ app.mount("/files", StaticFiles(directory=str(upload_root)), name="files")
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(images.router)
+app.include_router(regions.router)
 
 
 @app.get("/health")
@@ -34,5 +35,5 @@ def health():
     return {
         "status": "ok",
         "app": settings.app_name,
-        "phase": "04-upload-quality",
+        "phase": "05-structure-regions",
     }
