@@ -89,7 +89,7 @@ class Role(Base):
     __tablename__ = "roles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[RoleName] = mapped_column(Enum(RoleName, name="role_name", native_enum=False), unique=True, nullable=False)
+    name: Mapped[RoleName] = mapped_column(Enum(RoleName, name="role_name", native_enum=True), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(String(255))
 
     users: Mapped[list["UserRole"]] = relationship(back_populates="role")
@@ -348,3 +348,4 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped[Project] = relationship(back_populates="reports")
+
