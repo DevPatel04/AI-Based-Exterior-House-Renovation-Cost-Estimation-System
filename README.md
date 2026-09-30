@@ -8,7 +8,7 @@ Pre-construction planning platform: upload a house exterior photo, detect struct
 |-------|------------|
 | Frontend | Next.js, TypeScript, Tailwind CSS, Konva |
 | Backend | FastAPI, SQLAlchemy, Alembic |
-| Database | PostgreSQL |
+| Database | **PostgreSQL (native / local — no Docker)** |
 | Files | Local disk (`backend/uploads/`) |
 | Vision | Google Gemini |
 | Redesign images | Cloudflare Workers AI (optional Gemini HQ) |
@@ -20,7 +20,6 @@ Pre-construction planning platform: upload a house exterior photo, detect struct
 backend/     FastAPI API
 frontend/    Next.js UI
 docs/        Architecture, workflows, estimation, limitations
-docker-compose.yml
 ```
 
 ## Branching
@@ -29,26 +28,52 @@ docker-compose.yml
 - `develop` — integration
 - `feature/<nn>-<name>` — phase work (PR into `develop`)
 
-## Quick start
+## Quick start (no Docker)
 
-### 1. Database
+### 1. Native PostgreSQL
 
 ```bash
-docker compose up -d
+# Install (Ubuntu/Debian) if needed
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+
+# Start service
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Create app user + database
+sudo -u postgres psql <<'SQL'
+CREATE USER renovation WITH PASSWORD 'renovation';
+CREATE DATABASE renovation OWNER renovation;
+GRANT ALL PRIVILEGES ON DATABASE renovation TO renovation;
+\c renovation
+GRANT ALL ON SCHEMA public TO renovation;
+ALTER SCHEMA public OWNER TO renovation;
+SQL
+```
+
+Test:
+
+```bash
+PGPASSWORD=renovation psql -h localhost -U renovation -d renovation -c "SELECT current_database();"
 ```
 
 ### 2. Backend
 
 ```bash
 cd backend
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
+# DATABASE_URL should be:
+# postgresql+psycopg2://renovation:renovation@localhost:5432/renovation
 alembic upgrade head
 python -m app.seed
 uvicorn app.main:app --reload --port 8000
 ```
+
+Default admin after seed: `admin@renovation.local` / `admin123`
 
 ### 3. Frontend
 

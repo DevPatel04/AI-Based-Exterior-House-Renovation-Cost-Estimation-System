@@ -17,6 +17,8 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+backend/renovation.db
+*.db
 
 # Node / Next.js
 node_modules/
@@ -29,7 +31,8 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # Local uploads & generated files
-backend/uploads/
+backend/uploads/*
+!backend/uploads/.gitkeep
 *.pdf.pdf
 reports_output/
 
@@ -41,10 +44,8 @@ Thumbs.db
 *.swp
 *.swo
 
-# Docker volumes
-postgres_data/
-
 # Coverage / logs
 coverage/
 htmlcov/
 *.log
+.phase_stash/
