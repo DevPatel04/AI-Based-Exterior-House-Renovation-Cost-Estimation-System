@@ -5,8 +5,9 @@ const nextConfig = {
       { protocol: "http", hostname: "localhost", port: "8000", pathname: "/**" },
     ],
   },
-  // Konva pulls optional Node `canvas` via index-node.js; browser app never needs it.
-  webpack: (config) => {
+  // react-konva/konva optionally require Node `canvas` (native). Browser UI never needs it.
+  // Do NOT npm install `canvas` — it fails on Railway without system libs.
+  webpack: (config, { isServer, webpack }) => {
     config.resolve.alias = {
       ...(config.resolve.alias || {}),
       canvas: false,
@@ -14,7 +15,16 @@ const nextConfig = {
     config.resolve.fallback = {
       ...(config.resolve.fallback || {}),
       canvas: false,
+      encoding: false,
     };
+    config.plugins.push(
+      new webpack.IgnorePlugin({
+        resourceRegExp: /^canvas$/,
+      })
+    );
+    if (isServer) {
+      config.externals = [...(config.externals || []), "canvas"];
+    }
     return config;
   },
 };
