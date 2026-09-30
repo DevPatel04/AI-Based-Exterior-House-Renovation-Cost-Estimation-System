@@ -1,0 +1,159 @@
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+export type RoleName =
+  | "homeowner"
+  | "contractor"
+  | "architect"
+  | "builder"
+  | "consultant"
+  | "supplier"
+  | "admin";
+
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("token");
+}
+
+export function setToken(token: string) {
+  localStorage.setItem("token", token);
+}
+
+export function clearToken() {
+  localStorage.removeItem("token");
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers || {});
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (!(options.body instanceof FormData) && !headers.has("Content-Type") && options.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  const res = await fetch(`${API_URL}${path}`, { ...options, headers });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      detail = data.detail || JSON.stringify(data);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  if (res.status === 204) return undefined as T;
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  return res as unknown as T;
+}
+
+export const api = {
+  register: (body: object) =>
+    request("/api/auth/register", { method: "POST", body: JSON.stringify(body) }),
+  login: async (email: string, password: string) => {
+    const form = new URLSearchParams();
+    form.set("username", email);
+    form.set("password", password);
+    const res = await fetch(`${API_URL}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    if (!res.ok) throw new Error("Login failed");
+    return res.json() as Promise<{ access_token: string }>;
+  },
+  me: () => request<any>("/api/auth/me"),
+  updateMe: (body: object) =>
+    request("/api/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
+  listUsers: () => request<any[]>("/api/auth/users"),
+  assignRole: (userId: number, role: string) =>
+    request(`/api/auth/users/${userId}/roles`, {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    }),
+  listProjects: () => request<any[]>("/api/projects"),
+  createProject: (body: object) =>
+    request("/api/projects", { method: "POST", body: JSON.stringify(body) }),
+  getProject: (id: number) => request<any>(`/api/projects/${id}`),
+  updateProject: (id: number, body: object) =>
+    request(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  archiveProject: (id: number) => request(`/api/projects/${id}`, { method: "DELETE" }),
+  shareProject: (id: number, body: object) =>
+    request(`/api/projects/${id}/members`, { method: "POST", body: JSON.stringify(body) }),
+  listMembers: (id: number) => request<any[]>(`/api/projects/${id}/members`),
+  uploadImage: (projectId: number, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<any>(`/api/projects/${projectId}/images`, { method: "POST", body: fd });
+  },
+  listImages: (projectId: number) => request<any[]>(`/api/projects/${projectId}/images`),
+  imageUrl: (projectId: number, imageId: number) =>
+    `${API_URL}/api/projects/${projectId}/images/${imageId}/file`,
+  detectRegions: (projectId: number) =>
+    request<any[]>(`/api/projects/${projectId}/regions/detect`, { method: "POST" }),
+  listRegions: (projectId: number) => request<any[]>(`/api/projects/${projectId}/regions`),
+  updateRegion: (projectId: number, regionId: number, body: object) =>
+    request(`/api/projects/${projectId}/regions/${regionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteRegion: (projectId: number, regionId: number) =>
+    request(`/api/projects/${projectId}/regions/${regionId}`, { method: "DELETE" }),
+  listMaterials: () => request<any[]>("/api/materials"),
+  createMaterial: (body: object) =>
+    request("/api/materials", { method: "POST", body: JSON.stringify(body) }),
+  updateMaterial: (id: number, body: object) =>
+    request(`/api/materials/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  listDesigns: (projectId: number) => request<any[]>(`/api/projects/${projectId}/designs`),
+  createDesign: (projectId: number, name: string) =>
+    request(`/api/projects/${projectId}/designs`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  activateDesign: (projectId: number, designId: number) =>
+    request(`/api/projects/${projectId}/designs/${designId}/activate`, { method: "POST" }),
+  assignMaterials: (projectId: number, designId: number, items: object[]) =>
+    request(`/api/projects/${projectId}/designs/${designId}/materials`, {
+      method: "POST",
+      body: JSON.stringify(items),
+    }),
+  getDesignMaterials: (projectId: number, designId: number) =>
+    request<any[]>(`/api/projects/${projectId}/designs/${designId}/materials`),
+  visualize: (projectId: number, designId: number, hq_mode = false) =>
+    request(`/api/projects/${projectId}/designs/visualize`, {
+      method: "POST",
+      body: JSON.stringify({ design_id: designId, hq_mode }),
+    }),
+  redesignUrl: (projectId: number, designId: number) =>
+    `${API_URL}/api/projects/${projectId}/designs/${designId}/redesign`,
+  estimateAreas: (projectId: number, body?: object) =>
+    request(`/api/projects/${projectId}/estimation/areas`, {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
+  listAreas: (projectId: number) => request<any[]>(`/api/projects/${projectId}/estimation/areas`),
+  calculate: (projectId: number) =>
+    request(`/api/projects/${projectId}/estimation/calculate`, { method: "POST" }),
+  listQuantities: (projectId: number) =>
+    request<any[]>(`/api/projects/${projectId}/estimation/quantities`),
+  overrideQuantity: (projectId: number, body: object) =>
+    request(`/api/projects/${projectId}/estimation/quantities/override`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  setRates: (projectId: number, body: object) =>
+    request(`/api/projects/${projectId}/estimation/rates`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getCosts: (projectId: number) => request<any>(`/api/projects/${projectId}/estimation/costs`),
+  createReport: (projectId: number, designId?: number) =>
+    request(
+      `/api/projects/${projectId}/reports${designId ? `?design_id=${designId}` : ""}`,
+      { method: "POST" }
+    ),
+  listReports: (projectId: number) => request<any[]>(`/api/projects/${projectId}/reports`),
+  reportDownloadUrl: (projectId: number, reportId: number) =>
+    `${API_URL}/api/projects/${projectId}/reports/${reportId}/download`,
+};
+
+export { API_URL };
