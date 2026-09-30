@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/projects/{project_id}/images", tags=["images"])
 async def upload_image(
     project_id: int,
     file: UploadFile = File(...),
+    set_primary: str = Form("false"),
     user: User = Depends(require_permission("project:edit")),
     db: Session = Depends(get_db),
 ):
@@ -31,13 +32,16 @@ async def upload_image(
     if gemini_note:
         message = f"{message} {gemini_note}"
 
-    # First image becomes primary
     existing = db.query(ProjectImage).filter(ProjectImage.project_id == project.id).count()
+    make_primary = existing == 0 or set_primary.lower() in {"1", "true", "yes", "on"}
+    if make_primary and existing > 0:
+        db.query(ProjectImage).filter(ProjectImage.project_id == project.id).update({"is_primary": False})
+
     image = ProjectImage(
         project_id=project.id,
         file_path=rel,
         original_filename=file.filename,
-        is_primary=existing == 0,
+        is_primary=make_primary,
         quality_ok=ok,
         quality_message=message,
         width_px=w,
@@ -46,9 +50,28 @@ async def upload_image(
     db.add(image)
     db.commit()
     db.refresh(image)
-    if not ok:
-        # Still saved so user can see guidance; client should block continue
-        pass
+    return image
+
+
+@router.post("/{image_id}/set-primary", response_model=ImageOut)
+def set_primary_image(
+    project_id: int,
+    image_id: int,
+    user: User = Depends(require_permission("project:edit")),
+    db: Session = Depends(get_db),
+):
+    project = _get_project_or_404(db, project_id, user)
+    image = (
+        db.query(ProjectImage)
+        .filter(ProjectImage.id == image_id, ProjectImage.project_id == project.id)
+        .first()
+    )
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
+    db.query(ProjectImage).filter(ProjectImage.project_id == project.id).update({"is_primary": False})
+    image.is_primary = True
+    db.commit()
+    db.refresh(image)
     return image
 
 

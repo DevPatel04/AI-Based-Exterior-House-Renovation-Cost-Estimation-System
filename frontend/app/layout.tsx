@@ -50,6 +50,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                   <Link className="hover:text-pine" href="/dashboard">
                     Projects
                   </Link>
+                  <Link className="hover:text-pine" href="/profile">
+                    Profile
+                  </Link>
                   {(roles.includes("supplier") || roles.includes("admin")) && (
                     <Link className="hover:text-pine" href="/catalog">
                       Catalog

@@ -106,6 +106,27 @@ export default function CatalogPage() {
               ₹{m.material_rate}/{m.unit} mat · ₹{m.labor_rate} labor · {m.wastage_percent}% wastage
             </p>
             <p className="text-xs mt-2">{m.approved ? "Approved" : "Pending approval"} · {m.is_active ? "Active" : "Inactive"}</p>
+            {m.suitable_regions?.length ? (
+              <p className="text-xs text-slate mt-1">Suits: {m.suitable_regions.join(", ")}</p>
+            ) : null}
+            <div className="mt-2">
+              <label className="text-xs font-semibold">Upload texture image</label>
+              <input
+                type="file"
+                accept="image/*"
+                className="block text-xs mt-1"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  try {
+                    await api.uploadTexture(m.id, f);
+                    setMessage(`Texture added to ${m.name}`);
+                  } catch (err: any) {
+                    setError(err.message);
+                  }
+                }}
+              />
+            </div>
             {!m.approved && (
               <button
                 className="btn-ghost mt-2 text-sm"

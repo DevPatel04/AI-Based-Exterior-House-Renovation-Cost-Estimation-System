@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_current_user, get_user_role_names, require_permission
+from app.api.deps import get_current_user, require_permission
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models import Role, RoleName, User, UserRole
+from app.models import Role, User, UserRole
 from app.schemas import AssignRoleIn, Token, UserCreate, UserOut, UserUpdate
+from app.services.storage import absolute_path, save_upload
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -82,6 +84,36 @@ def update_me(payload: UserUpdate, user: User = Depends(get_current_user), db: S
         .first()
     )
     return _user_out(user)
+
+
+@router.post("/me/logo", response_model=UserOut)
+async def upload_logo(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image logos are allowed")
+    rel, _ = save_upload(file, "logos")
+    user.logo_path = rel
+    db.commit()
+    user = (
+        db.query(User)
+        .options(joinedload(User.roles).joinedload(UserRole.role))
+        .filter(User.id == user.id)
+        .first()
+    )
+    return _user_out(user)
+
+
+@router.get("/me/logo")
+def get_my_logo(user: User = Depends(get_current_user)):
+    if not user.logo_path:
+        raise HTTPException(status_code=404, detail="No logo uploaded")
+    path = absolute_path(user.logo_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Logo file missing")
+    return FileResponse(path)
 
 
 @router.post("/users/{user_id}/roles", response_model=UserOut)

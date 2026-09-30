@@ -64,6 +64,11 @@ export const api = {
   me: () => request<any>("/api/auth/me"),
   updateMe: (body: object) =>
     request("/api/auth/me", { method: "PATCH", body: JSON.stringify(body) }),
+  uploadLogo: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<any>("/api/auth/me/logo", { method: "POST", body: fd });
+  },
   listUsers: () => request<any[]>("/api/auth/users"),
   assignRole: (userId: number, role: string) =>
     request(`/api/auth/users/${userId}/roles`, {
@@ -80,17 +85,25 @@ export const api = {
   shareProject: (id: number, body: object) =>
     request(`/api/projects/${id}/members`, { method: "POST", body: JSON.stringify(body) }),
   listMembers: (id: number) => request<any[]>(`/api/projects/${id}/members`),
-  uploadImage: (projectId: number, file: File) => {
+  uploadImage: (projectId: number, file: File, setPrimary = false) => {
     const fd = new FormData();
     fd.append("file", file);
+    fd.append("set_primary", setPrimary ? "true" : "false");
     return request<any>(`/api/projects/${projectId}/images`, { method: "POST", body: fd });
   },
+  setPrimaryImage: (projectId: number, imageId: number) =>
+    request(`/api/projects/${projectId}/images/${imageId}/set-primary`, { method: "POST" }),
   listImages: (projectId: number) => request<any[]>(`/api/projects/${projectId}/images`),
   imageUrl: (projectId: number, imageId: number) =>
     `${API_URL}/api/projects/${projectId}/images/${imageId}/file`,
   detectRegions: (projectId: number) =>
     request<any[]>(`/api/projects/${projectId}/regions/detect`, { method: "POST" }),
   listRegions: (projectId: number) => request<any[]>(`/api/projects/${projectId}/regions`),
+  createRegion: (projectId: number, body: object) =>
+    request(`/api/projects/${projectId}/regions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   updateRegion: (projectId: number, regionId: number, body: object) =>
     request(`/api/projects/${projectId}/regions/${regionId}`, {
       method: "PATCH",
@@ -103,6 +116,13 @@ export const api = {
     request("/api/materials", { method: "POST", body: JSON.stringify(body) }),
   updateMaterial: (id: number, body: object) =>
     request(`/api/materials/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  uploadTexture: (materialId: number, file: File, label?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (label) fd.append("label", label);
+    return request(`/api/materials/${materialId}/textures`, { method: "POST", body: fd });
+  },
+  listTextures: (materialId: number) => request<any[]>(`/api/materials/${materialId}/textures`),
   listDesigns: (projectId: number) => request<any[]>(`/api/projects/${projectId}/designs`),
   createDesign: (projectId: number, name: string) =>
     request(`/api/projects/${projectId}/designs`, {
@@ -131,6 +151,11 @@ export const api = {
       body: JSON.stringify(body || {}),
     }),
   listAreas: (projectId: number) => request<any[]>(`/api/projects/${projectId}/estimation/areas`),
+  overrideArea: (projectId: number, body: object) =>
+    request(`/api/projects/${projectId}/estimation/areas/override`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   calculate: (projectId: number) =>
     request(`/api/projects/${projectId}/estimation/calculate`, { method: "POST" }),
   listQuantities: (projectId: number) =>

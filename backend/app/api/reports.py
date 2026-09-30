@@ -24,7 +24,8 @@ def create_report(
     design = None
     if design_id:
         design = db.query(Design).filter(Design.id == design_id, Design.project_id == project.id).first()
-    report = generate_project_report(db, project, design)
+    # Prefer the downloading user's logo for consultant/contractor branding
+    report = generate_project_report(db, project, design, branding_user=user)
     return report
 
 

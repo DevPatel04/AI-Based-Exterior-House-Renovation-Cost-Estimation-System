@@ -1,5 +1,4 @@
 import uuid
-from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -9,11 +8,26 @@ from reportlab.platypus import Image as RLImage
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy.orm import Session
 
-from app.models import CostLine, Design, Material, Project, ProjectImage, ProjectStatus, QuantityLine, Report
+from app.models import (
+    CostLine,
+    Design,
+    Material,
+    Project,
+    ProjectImage,
+    ProjectStatus,
+    QuantityLine,
+    Report,
+    User,
+)
 from app.services.storage import absolute_path, ensure_upload_dirs
 
 
-def generate_project_report(db: Session, project: Project, design: Design | None = None) -> Report:
+def generate_project_report(
+    db: Session,
+    project: Project,
+    design: Design | None = None,
+    branding_user: User | None = None,
+) -> Report:
     ensure_upload_dirs()
     if design is None:
         design = (
@@ -37,6 +51,17 @@ def generate_project_report(db: Session, project: Project, design: Design | None
     styles = getSampleStyleSheet()
     doc = SimpleDocTemplate(str(dest), pagesize=A4)
     story = []
+
+    brand_user = branding_user or db.get(User, project.owner_id)
+    if brand_user and brand_user.logo_path:
+        logo = absolute_path(brand_user.logo_path)
+        if logo.exists():
+            story.append(RLImage(str(logo), width=1.6 * inch, height=0.7 * inch, kind="proportional"))
+            story.append(Spacer(1, 0.1 * inch))
+            company = brand_user.company or brand_user.full_name
+            story.append(Paragraph(f"<b>{company}</b>", styles["Normal"]))
+            story.append(Spacer(1, 0.15 * inch))
+
     story.append(Paragraph("Exterior Renovation Planning Report", styles["Title"]))
     story.append(Spacer(1, 0.2 * inch))
     story.append(Paragraph(f"Project: <b>{project.title}</b>", styles["Normal"]))
@@ -65,7 +90,6 @@ def generate_project_report(db: Session, project: Project, design: Design | None
             story.append(RLImage(str(redes), width=5.5 * inch, height=3.5 * inch, kind="proportional"))
             story.append(Spacer(1, 0.2 * inch))
 
-    # Materials
     story.append(Paragraph("Selected materials", styles["Heading2"]))
     if design:
         from app.models import DesignRegionMaterial
@@ -95,7 +119,6 @@ def generate_project_report(db: Session, project: Project, design: Design | None
             story.append(Paragraph("No materials assigned yet.", styles["Normal"]))
     story.append(Spacer(1, 0.2 * inch))
 
-    # Quantities
     story.append(Paragraph("Quantity calculations", styles["Heading2"]))
     qrows = [["Category", "Material ID", "Base", "Wastage %", "Final", "Unit"]]
     for q in db.query(QuantityLine).filter(QuantityLine.project_id == project.id).all():
@@ -125,7 +148,6 @@ def generate_project_report(db: Session, project: Project, design: Design | None
         story.append(Paragraph("No quantities calculated yet.", styles["Normal"]))
     story.append(Spacer(1, 0.2 * inch))
 
-    # Costs
     story.append(Paragraph("Cost breakdown", styles["Heading2"]))
     crows = [["Category", "Qty", "Mat. rate", "Labor rate", "Material", "Labor", "Total"]]
     mat_sum = lab_sum = grand = 0.0

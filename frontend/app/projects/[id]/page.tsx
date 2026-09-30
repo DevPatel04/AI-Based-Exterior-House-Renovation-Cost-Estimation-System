@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { api, getToken } from "@/lib/api";
 
 const RegionCanvas = dynamic(() => import("@/components/RegionCanvas"), { ssr: false });
+const ImageCropper = dynamic(() => import("@/components/ImageCropper"), { ssr: false });
 
 const STEPS = ["Upload", "Regions", "Materials", "Visualize", "Estimate", "Report"] as const;
 
@@ -28,6 +29,9 @@ export default function ProjectWorkspacePage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [pendingCrop, setPendingCrop] = useState<File | null>(null);
+  const [newDesignName, setNewDesignName] = useState("Design B");
   const [facadeWidth, setFacadeWidth] = useState("30");
   const [facadeHeight, setFacadeHeight] = useState("22");
   const [user, setUser] = useState<any>(null);
@@ -80,10 +84,16 @@ export default function ProjectWorkspacePage() {
     e.preventDefault();
     const input = e.currentTarget.elements.namedItem("file") as HTMLInputElement;
     if (!input.files?.[0]) return;
+    setPendingCrop(input.files[0]);
+  }
+
+  async function uploadCropped(file: File, setPrimary = true) {
     setBusy(true);
+    setProgress("Uploading and checking image quality…");
     setError("");
+    setPendingCrop(null);
     try {
-      const img = await api.uploadImage(projectId, input.files[0]);
+      const img = await api.uploadImage(projectId, file, setPrimary);
       setMessage(img.quality_message || "Uploaded");
       await refresh();
       if (img.quality_ok) setStep(1);
@@ -91,11 +101,13 @@ export default function ProjectWorkspacePage() {
       setError(err.message);
     } finally {
       setBusy(false);
+      setProgress("");
     }
   }
 
   async function detect() {
     setBusy(true);
+    setProgress("Detecting structure regions (AI)…");
     setError("");
     try {
       const regs = await api.detectRegions(projectId);
@@ -106,6 +118,7 @@ export default function ProjectWorkspacePage() {
       setError(err.message);
     } finally {
       setBusy(false);
+      setProgress("");
     }
   }
 
@@ -140,6 +153,7 @@ export default function ProjectWorkspacePage() {
 
   async function runVisualize(hq = false) {
     setBusy(true);
+    setProgress(hq ? "Generating HQ redesign (Gemini)…" : "Generating redesign (Cloudflare / local)…");
     setError("");
     try {
       const designId = await ensureDesign();
@@ -147,6 +161,45 @@ export default function ProjectWorkspacePage() {
       setMessage(hq ? "HQ redesign generated." : "Redesign generated.");
       await refresh();
       setStep(3);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
+  async function switchDesign(designId: number) {
+    setBusy(true);
+    setProgress("Switching design…");
+    try {
+      await api.activateDesign(projectId, designId);
+      setActiveDesignId(designId);
+      const map = await api.getDesignMaterials(projectId, designId);
+      const obj: Record<number, number> = {};
+      map.forEach((m: any) => {
+        obj[m.region_id] = m.material_id;
+      });
+      setAssignments(obj);
+      await refresh();
+      setMessage("Active design switched.");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
+  async function addDesignVariant() {
+    setBusy(true);
+    try {
+      const d = await api.createDesign(projectId, newDesignName || `Design ${designs.length + 1}`);
+      setDesigns((prev) => [d, ...prev]);
+      setActiveDesignId(d.id);
+      setAssignments({});
+      setMessage(`Created ${d.name}. Assign materials, then save.`);
+      setStep(2);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -254,26 +307,55 @@ export default function ProjectWorkspacePage() {
 
       {message && <p className="text-pine text-sm">{message}</p>}
       {error && <p className="text-clay text-sm">{error}</p>}
-      {busy && <p className="text-slate text-sm">Working…</p>}
+      {(busy || progress) && (
+        <div className="card-panel p-3 text-sm text-slate flex items-center gap-3">
+          <span className="inline-block h-3 w-3 rounded-full bg-pine animate-pulse" />
+          {progress || "Working…"}
+        </div>
+      )}
 
       {step === 0 && (
         <section className="card-panel p-6 space-y-4">
           <h2 className="font-display text-2xl">Upload exterior photo</h2>
           <p className="text-slate text-sm">
-            Use a clear daytime photo of the facade. Low quality images will be rejected with guidance.
+            Use a clear daytime photo of the facade. You can crop to a usable view, then quality checks run automatically.
+            Upload multiple angles if needed and set one as primary.
           </p>
-          <form onSubmit={onUpload} className="flex flex-wrap gap-3 items-center">
-            <input name="file" type="file" accept="image/*" className="input" required />
-            <button className="btn-primary" disabled={busy}>
-              Upload & check quality
-            </button>
-          </form>
-          {primary && (
-            <div>
-              <AuthImage projectId={projectId} imageId={primary.id} />
-              <p className="text-sm mt-2">{primary.quality_ok ? "Quality OK" : "Needs better photo"} — {primary.quality_message}</p>
-            </div>
+          {pendingCrop ? (
+            <ImageCropper
+              file={pendingCrop}
+              onCancel={() => setPendingCrop(null)}
+              onCropped={(f) => uploadCropped(f, true)}
+            />
+          ) : (
+            <form onSubmit={onUpload} className="flex flex-wrap gap-3 items-center">
+              <input name="file" type="file" accept="image/*" className="input" required />
+              <button className="btn-primary" disabled={busy}>
+                Choose & crop
+              </button>
+            </form>
           )}
+          <div className="grid md:grid-cols-3 gap-3">
+            {images.map((img) => (
+              <div key={img.id} className="border border-mist rounded-xl p-2">
+                <AuthImage projectId={projectId} imageId={img.id} />
+                <p className="text-xs mt-1">{img.is_primary ? "Primary" : "Extra angle"}</p>
+                <p className="text-xs text-slate line-clamp-2">{img.quality_message}</p>
+                {!img.is_primary && (
+                  <button
+                    type="button"
+                    className="text-pine text-xs underline mt-1"
+                    onClick={async () => {
+                      await api.setPrimaryImage(projectId, img.id);
+                      await refresh();
+                    }}
+                  >
+                    Set primary
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
       )}
 
@@ -304,29 +386,63 @@ export default function ProjectWorkspacePage() {
       {step === 2 && (
         <section className="card-panel p-6 space-y-4">
           <h2 className="font-display text-2xl">Apply materials</h2>
+          <div className="flex flex-wrap gap-2 items-center">
+            <select
+              className="input w-56"
+              value={activeDesignId || ""}
+              onChange={(e) => e.target.value && switchDesign(Number(e.target.value))}
+            >
+              <option value="">Select design variant</option>
+              {designs.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                  {d.is_active ? " (active)" : ""}
+                </option>
+              ))}
+            </select>
+            <input
+              className="input w-40"
+              value={newDesignName}
+              onChange={(e) => setNewDesignName(e.target.value)}
+              placeholder="New design name"
+            />
+            <button type="button" className="btn-ghost" onClick={addDesignVariant}>
+              Add design variant
+            </button>
+          </div>
           <div className="space-y-3">
-            {regions.map((r) => (
-              <div key={r.id} className="grid md:grid-cols-[1fr_2fr] gap-3 items-center">
-                <div>
-                  <p className="font-semibold">{r.label || r.region_type}</p>
-                  <p className="text-xs text-slate">{r.region_type}</p>
+            {regions.map((r) => {
+              const suited = materials.filter(
+                (m) =>
+                  !m.suitable_regions?.length ||
+                  m.suitable_regions.includes(r.region_type) ||
+                  m.suitable_regions.includes("other")
+              );
+              const list = suited.length ? suited : materials;
+              return (
+                <div key={r.id} className="grid md:grid-cols-[1fr_2fr] gap-3 items-center">
+                  <div>
+                    <p className="font-semibold">{r.label || r.region_type}</p>
+                    <p className="text-xs text-slate">{r.region_type}</p>
+                    <p className="text-xs text-pine">Hint: materials suited to {r.region_type}</p>
+                  </div>
+                  <select
+                    className="input"
+                    value={assignments[r.id] || ""}
+                    onChange={(e) =>
+                      setAssignments({ ...assignments, [r.id]: Number(e.target.value) })
+                    }
+                  >
+                    <option value="">Select material</option>
+                    {list.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.material_type}) — ₹{m.material_rate}/{m.unit}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <select
-                  className="input"
-                  value={assignments[r.id] || ""}
-                  onChange={(e) =>
-                    setAssignments({ ...assignments, [r.id]: Number(e.target.value) })
-                  }
-                >
-                  <option value="">Select material</option>
-                  {materials.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name} ({m.material_type}) — ₹{m.material_rate}/{m.unit}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <button className="btn-primary" onClick={saveAssignments} disabled={busy}>
             Save design & continue
@@ -396,6 +512,7 @@ export default function ProjectWorkspacePage() {
                   <th className="py-2">Region</th>
                   <th>Area sq ft</th>
                   <th>Length ft</th>
+                  <th>Override</th>
                 </tr>
               </thead>
               <tbody>
@@ -404,6 +521,44 @@ export default function ProjectWorkspacePage() {
                     <td className="py-2">{a.region_type}</td>
                     <td>{a.area_sq_ft}</td>
                     <td>{a.length_ft ?? "—"}</td>
+                    <td>
+                      {(roles.includes("contractor") ||
+                        roles.includes("architect") ||
+                        roles.includes("builder") ||
+                        roles.includes("admin")) && (
+                        <button
+                          type="button"
+                          className="text-pine underline"
+                          onClick={async () => {
+                            const val = prompt("Override area sq ft", String(a.area_sq_ft));
+                            if (!val) return;
+                            setBusy(true);
+                            setProgress("Saving area override…");
+                            try {
+                              await api.overrideArea(projectId, {
+                                region_id: a.region_id,
+                                region_type: a.region_type,
+                                area_sq_ft: Number(val),
+                                length_ft: a.length_ft,
+                                notes: "user override",
+                              });
+                              setAreas(await api.listAreas(projectId));
+                              const c = await api.calculate(projectId);
+                              setCosts(c);
+                              setQuantities(await api.listQuantities(projectId));
+                              setMessage("Area overridden and costs recalculated.");
+                            } catch (err: any) {
+                              setError(err.message);
+                            } finally {
+                              setBusy(false);
+                              setProgress("");
+                            }
+                          }}
+                        >
+                          Override
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
