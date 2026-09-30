@@ -41,7 +41,7 @@ class RoleOut(BaseModel):
 
 class UserOut(BaseModel):
     id: int
-    email: EmailStr
+    email: str  # str (not EmailStr) so seeded / legacy addresses still serialize
     full_name: str
     phone: str | None
     company: str | None

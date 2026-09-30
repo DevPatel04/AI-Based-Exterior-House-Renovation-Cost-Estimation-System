@@ -101,8 +101,16 @@ def seed() -> None:
                 db.add(Role(name=name, description=desc))
         db.commit()
 
-        admin_email = "admin@renovation.local"
+        admin_email = "admin@example.com"
+        legacy_email = "admin@renovation.local"
         admin = db.query(User).filter(User.email == admin_email).first()
+        if not admin:
+            legacy = db.query(User).filter(User.email == legacy_email).first()
+            if legacy:
+                legacy.email = admin_email
+                db.commit()
+                admin = legacy
+                print(f"Migrated admin email {legacy_email} → {admin_email}")
         if not admin:
             admin = User(
                 email=admin_email,

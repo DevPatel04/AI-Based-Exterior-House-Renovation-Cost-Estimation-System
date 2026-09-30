@@ -23,7 +23,7 @@
 4. Wait for admin approval if required  
 
 ## Admin
-1. Login as admin (`admin@renovation.local` after seed)  
+1. Login as admin (`admin@example.com` after seed)  
 2. Assign roles under Admin  
 3. Approve supplier materials  
 4. Access all projects and system settings  

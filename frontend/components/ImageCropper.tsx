@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "@/components/icons";
 
 /** Simple crop UI: drag a box, export cropped File for upload (C3). */
 export default function ImageCropper({
@@ -13,6 +14,7 @@ export default function ImageCropper({
   onCropped: (file: File) => void;
 }) {
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const [src, setSrc] = useState("");
   const [box, setBox] = useState({ x: 10, y: 10, w: 80, h: 70 }); // % of displayed image
   const drag = useRef<{ kind: string; sx: number; sy: number; start: typeof box } | null>(null);
@@ -24,7 +26,8 @@ export default function ImageCropper({
   }, [file]);
 
   function onPointerDown(e: React.PointerEvent, kind: string) {
-    const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+    // Measure against the image wrapper (same frame as onPointerMove) for both move and resize.
+    const rect = (wrapRef.current ?? (e.currentTarget.parentElement as HTMLElement)).getBoundingClientRect();
     drag.current = {
       kind,
       sx: ((e.clientX - rect.left) / rect.width) * 100,
@@ -81,36 +84,52 @@ export default function ImageCropper({
   }
 
   return (
-    <div className="card-panel p-4 space-y-3">
-      <h3 className="font-semibold">Crop usable view</h3>
-      <p className="text-sm text-slate">Drag the box to frame the facade, then apply crop before quality check.</p>
-      <div
-        className="relative inline-block max-w-full select-none"
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img ref={imgRef} src={src} alt="crop source" className="max-h-80 rounded-lg block" />
+    <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+      <div>
+        <h3 className="flex items-center gap-2 font-semibold text-slate-900">
+          <Icon name="crop" className="h-4 w-4 text-brand-600" /> Frame the facade
+        </h3>
+        <p className="mt-0.5 text-sm text-slate-500">
+          Drag the box to frame the house and use the corner handle to resize. Quality checks run on the cropped view.
+        </p>
+      </div>
+      <div className="flex justify-center rounded-lg bg-slate-900/90 p-2">
         <div
-          className="absolute border-2 border-pine bg-pine/20 cursor-move"
-          style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}
-          onPointerDown={(e) => onPointerDown(e, "move")}
+          ref={wrapRef}
+          className="relative inline-block max-w-full touch-none select-none overflow-hidden rounded"
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
         >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img ref={imgRef} src={src} alt="Photo to crop" className="block max-h-[60vh] max-w-full rounded" draggable={false} />
           <div
-            className="absolute right-0 bottom-0 w-4 h-4 bg-clay cursor-se-resize"
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              onPointerDown(e, "resize");
-            }}
-          />
+            className="absolute cursor-move border-2 border-white shadow-[0_0_0_9999px_rgba(15,23,42,0.55)]"
+            style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}
+            onPointerDown={(e) => onPointerDown(e, "move")}
+          >
+            <div className="pointer-events-none absolute inset-0 grid grid-cols-3 grid-rows-3">
+              {Array.from({ length: 9 }).map((_, i) => (
+                <div key={i} className="border border-white/25" />
+              ))}
+            </div>
+            <div
+              role="presentation"
+              className="absolute bottom-0 right-0 h-6 w-6 cursor-se-resize rounded-tl-md border-l-2 border-t-2 border-white bg-accent-500"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onPointerDown(e, "resize");
+              }}
+            />
+          </div>
         </div>
       </div>
-      <div className="flex gap-2">
-        <button type="button" className="btn-primary" onClick={applyCrop}>
-          Apply crop & continue
-        </button>
-        <button type="button" className="btn-ghost" onClick={onCancel}>
+      <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <button type="button" className="btn-outline" onClick={onCancel}>
           Cancel
+        </button>
+        <button type="button" className="btn-primary" onClick={applyCrop}>
+          <Icon name="check" /> Apply crop & upload
         </button>
       </div>
     </div>

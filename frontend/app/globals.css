@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -6,36 +6,109 @@
 
 :root {
   --font-display: "Fraunces", Georgia, serif;
-  --font-sans: "Source Sans 3", "Segoe UI", sans-serif;
+  --font-sans: "Inter", system-ui, "Segoe UI", sans-serif;
 }
 
-body {
-  @apply bg-sand text-ink font-sans antialiased min-h-screen;
-  background-image:
-    radial-gradient(ellipse at top left, rgba(47, 111, 94, 0.08), transparent 45%),
-    radial-gradient(ellipse at bottom right, rgba(196, 92, 38, 0.08), transparent 40%);
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased min-h-screen;
+    font-feature-settings: "cv11", "ss01";
+  }
+  h1,
+  h2,
+  h3 {
+    @apply tracking-tight;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500/60 ring-offset-2 ring-offset-white;
+  }
 }
 
-.card-panel {
-  @apply bg-white/80 backdrop-blur border border-mist rounded-2xl shadow-sm;
-}
+@layer components {
+  /* Surfaces */
+  .card-panel {
+    @apply bg-white border border-slate-200 rounded-2xl shadow-card;
+  }
 
-.btn {
-  @apply inline-flex items-center justify-center rounded-xl px-4 py-2.5 font-semibold transition;
-}
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-semibold
+      transition-colors duration-150 select-none
+      disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-xs rounded-md;
+  }
+  .btn-lg {
+    @apply px-5 py-3 text-base;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white shadow-sm hover:bg-brand-700 active:bg-brand-800;
+  }
+  .btn-secondary {
+    @apply btn bg-slate-900 text-white shadow-sm hover:bg-slate-800 active:bg-slate-950;
+  }
+  .btn-outline {
+    @apply btn bg-white text-slate-700 border border-slate-300 shadow-sm hover:bg-slate-50 hover:text-slate-900 active:bg-slate-100;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-slate-700 hover:bg-slate-100 hover:text-slate-900 active:bg-slate-200;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white shadow-sm hover:bg-red-700 active:bg-red-800;
+  }
+  .btn-icon {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900;
+  }
+  .link {
+    @apply font-semibold text-brand-700 underline-offset-2 hover:underline;
+  }
 
-.btn-primary {
-  @apply btn bg-pine text-white hover:bg-pine/90;
-}
+  /* Form controls */
+  .label {
+    @apply block text-sm font-medium text-slate-700;
+  }
+  .input {
+    @apply block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm
+      placeholder:text-slate-400 transition-colors
+      hover:border-slate-400
+      focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20
+      disabled:bg-slate-50 disabled:text-slate-500 disabled:cursor-not-allowed;
+  }
+  .input-invalid {
+    @apply border-red-400 focus:border-red-500 focus:ring-red-500/20;
+  }
+  select.input {
+    @apply pr-9 appearance-none bg-no-repeat;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.6rem center;
+    background-size: 1.1em 1.1em;
+  }
+  .hint {
+    @apply mt-1.5 text-xs text-slate-500;
+  }
 
-.btn-secondary {
-  @apply btn bg-ink text-white hover:bg-ink/90;
-}
+  /* Tables */
+  .table {
+    @apply w-full text-sm;
+  }
+  .table thead th {
+    @apply bg-slate-50 px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 border-b border-slate-200;
+  }
+  .table tbody td {
+    @apply px-4 py-3 border-b border-slate-100 text-slate-700 align-middle;
+  }
+  .table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+  .table tbody tr {
+    @apply transition-colors hover:bg-slate-50/70;
+  }
 
-.btn-ghost {
-  @apply btn bg-mist text-ink hover:bg-mist/80;
-}
-
-.input {
-  @apply w-full rounded-xl border border-mist bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-pine/30;
+  .skeleton {
+    @apply animate-pulse rounded-lg bg-slate-200/70;
+  }
 }

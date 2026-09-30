@@ -1,7 +1,23 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import clsx from "clsx";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/components/AppShell";
+import { Icon } from "@/components/icons";
+import { useToast } from "@/components/Toast";
+import {
+  Alert,
+  Badge,
+  Card,
+  EmptyState,
+  Field,
+  FileButton,
+  formatINR,
+  humanize,
+  PageHeader,
+  Spinner,
+} from "@/components/ui";
 
 const TYPES = [
   "paint",
@@ -14,8 +30,14 @@ const TYPES = [
   "other",
 ];
 
+// Units understood by the estimation service (liter/bag/piece/panel use coverage per unit).
+const UNITS = ["sq_ft", "liter", "bag", "piece", "panel"];
+
 export default function CatalogPage() {
-  const [materials, setMaterials] = useState<any[]>([]);
+  const toast = useToast();
+  const { roles } = useAuth();
+  const isAdmin = roles.includes("admin");
+  const [materials, setMaterials] = useState<any[] | null>(null);
   const [form, setForm] = useState({
     name: "",
     material_type: "paint",
@@ -26,124 +48,292 @@ export default function CatalogPage() {
     labor_rate: 20,
     description: "",
   });
-  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
 
-  const load = () => api.listMaterials().then(setMaterials).catch((e) => setError(e.message));
+  const load = () =>
+    api
+      .listMaterials()
+      .then((m) => {
+        setMaterials(m);
+        setError("");
+      })
+      .catch((e) => setError(e.message));
   useEffect(() => {
     load();
   }, []);
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
+    setSubmitting(true);
     try {
       await api.createMaterial(form);
-      setMessage("Material submitted (admin approval may be required).");
+      toast.success("Material submitted. Admin approval may be required before it appears in designs.");
       setForm({ ...form, name: "" });
       load();
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message);
+    } finally {
+      setSubmitting(false);
     }
   }
 
+  const num = (key: keyof typeof form) => (e: { target: { value: string } }) =>
+    setForm({ ...form, [key]: Number(e.target.value) });
+
+  const filtered = useMemo(() => {
+    if (!materials) return [];
+    const q = query.trim().toLowerCase();
+    return materials.filter(
+      (m) =>
+        (!typeFilter || m.material_type === typeFilter) &&
+        (!q || m.name?.toLowerCase().includes(q) || m.description?.toLowerCase().includes(q))
+    );
+  }, [materials, query, typeFilter]);
+
+  const pendingCount = materials?.filter((m) => !m.approved).length ?? 0;
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="font-display text-4xl">Material catalog</h1>
-        <p className="text-slate">Suppliers and admins manage materials, rates, and suitability notes.</p>
-      </div>
-      <form onSubmit={onCreate} className="card-panel p-6 grid md:grid-cols-2 gap-3">
-        <input
-          className="input"
-          placeholder="Name"
-          value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
-          required
-        />
-        <select
-          className="input"
-          value={form.material_type}
-          onChange={(e) => setForm({ ...form, material_type: e.target.value })}
-        >
-          {TYPES.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        <input
-          className="input"
-          type="number"
-          placeholder="Material rate"
-          value={form.material_rate}
-          onChange={(e) => setForm({ ...form, material_rate: Number(e.target.value) })}
-        />
-        <input
-          className="input"
-          type="number"
-          placeholder="Labor rate"
-          value={form.labor_rate}
-          onChange={(e) => setForm({ ...form, labor_rate: Number(e.target.value) })}
-        />
-        <input
-          className="input md:col-span-2"
-          placeholder="Description"
-          value={form.description}
-          onChange={(e) => setForm({ ...form, description: e.target.value })}
-        />
-        <button className="btn-primary md:col-span-2">Add material</button>
-      </form>
-      {message && <p className="text-pine text-sm">{message}</p>}
-      {error && <p className="text-clay text-sm">{error}</p>}
-      <div className="grid md:grid-cols-2 gap-3">
-        {materials.map((m) => (
-          <div key={m.id} className="card-panel p-4">
-            <div className="flex justify-between gap-2">
-              <h2 className="font-semibold">{m.name}</h2>
-              <span className="text-xs bg-mist px-2 py-1 rounded">{m.material_type}</span>
+    <div className="space-y-8">
+      <PageHeader
+        title="Material catalog"
+        description="Manage materials, rates, and coverage used for redesigns and cost estimates."
+        actions={
+          materials && (
+            <>
+              <Badge>{materials.length} materials</Badge>
+              {pendingCount > 0 && <Badge tone="warning">{pendingCount} pending approval</Badge>}
+            </>
+          )
+        }
+      />
+
+      {error && (
+        <Alert tone="error" title="Couldn't load materials">
+          {error}{" "}
+          <button className="link" onClick={load}>
+            Try again
+          </button>
+        </Alert>
+      )}
+
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,380px)_1fr]">
+        <Card title="Add material" description="New materials may need admin approval." className="lg:sticky lg:top-24">
+          <form onSubmit={onCreate} className="space-y-4">
+            <Field label="Name" required>
+              {(id) => (
+                <input
+                  id={id}
+                  className="input"
+                  placeholder="e.g. Weatherproof exterior emulsion"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  required
+                />
+              )}
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Type">
+                {(id) => (
+                  <select
+                    id={id}
+                    className="input"
+                    value={form.material_type}
+                    onChange={(e) => setForm({ ...form, material_type: e.target.value })}
+                  >
+                    {TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {humanize(t)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+              <Field label="Unit">
+                {(id) => (
+                  <select id={id} className="input" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
+                    {UNITS.map((u) => (
+                      <option key={u} value={u}>
+                        {u.replace("_", " ")}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+              <Field label="Material rate (₹)">
+                {(id) => (
+                  <input id={id} className="input" type="number" min={0} step="any" inputMode="decimal" value={form.material_rate} onChange={num("material_rate")} />
+                )}
+              </Field>
+              <Field label="Labor rate (₹)">
+                {(id) => (
+                  <input id={id} className="input" type="number" min={0} step="any" inputMode="decimal" value={form.labor_rate} onChange={num("labor_rate")} />
+                )}
+              </Field>
+              <Field label="Coverage / unit" hint="sq ft per unit">
+                {(id) => (
+                  <input id={id} className="input" type="number" min={0} step="any" inputMode="decimal" value={form.coverage_per_unit} onChange={num("coverage_per_unit")} />
+                )}
+              </Field>
+              <Field label="Wastage (%)">
+                {(id) => (
+                  <input id={id} className="input" type="number" min={0} max={100} step="any" inputMode="decimal" value={form.wastage_percent} onChange={num("wastage_percent")} />
+                )}
+              </Field>
             </div>
-            <p className="text-sm text-slate mt-1">
-              ₹{m.material_rate}/{m.unit} mat · ₹{m.labor_rate} labor · {m.wastage_percent}% wastage
-            </p>
-            <p className="text-xs mt-2">{m.approved ? "Approved" : "Pending approval"} · {m.is_active ? "Active" : "Inactive"}</p>
-            {m.suitable_regions?.length ? (
-              <p className="text-xs text-slate mt-1">Suits: {m.suitable_regions.join(", ")}</p>
-            ) : null}
-            <div className="mt-2">
-              <label className="text-xs font-semibold">Upload texture image</label>
+            <Field label="Description" hint="Optional — finish, durability or suitability notes">
+              {(id) => (
+                <textarea
+                  id={id}
+                  rows={2}
+                  className="input resize-none"
+                  value={form.description}
+                  onChange={(e) => setForm({ ...form, description: e.target.value })}
+                />
+              )}
+            </Field>
+            <button className="btn-primary w-full" disabled={submitting}>
+              {submitting ? <Spinner /> : <Icon name="plus" />}
+              {submitting ? "Adding…" : "Add material"}
+            </button>
+          </form>
+        </Card>
+
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <div className="relative flex-1">
+              <Icon name="search" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
-                type="file"
-                accept="image/*"
-                className="block text-xs mt-1"
-                onChange={async (e) => {
-                  const f = e.target.files?.[0];
-                  if (!f) return;
-                  try {
-                    await api.uploadTexture(m.id, f);
-                    setMessage(`Texture added to ${m.name}`);
-                  } catch (err: any) {
-                    setError(err.message);
-                  }
-                }}
+                type="search"
+                className="input pl-9"
+                placeholder="Search materials"
+                aria-label="Search materials"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
               />
             </div>
-            {!m.approved && (
-              <button
-                className="btn-ghost mt-2 text-sm"
-                onClick={async () => {
-                  try {
-                    await api.updateMaterial(m.id, { approved: true });
-                    load();
-                  } catch (err: any) {
-                    setError(err.message);
-                  }
-                }}
-              >
-                Approve (admin)
-              </button>
-            )}
+            <select
+              className="input sm:w-48"
+              aria-label="Filter by type"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+            >
+              <option value="">All types</option>
+              {TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {humanize(t)}
+                </option>
+              ))}
+            </select>
           </div>
-        ))}
+
+          {materials === null && error ? null : materials === null ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="card-panel space-y-3 p-5">
+                  <div className="skeleton h-5 w-1/2" />
+                  <div className="skeleton h-4 w-3/4" />
+                  <div className="skeleton h-8 w-1/3" />
+                </div>
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
+            <EmptyState
+              icon="box"
+              title={materials.length ? "No matching materials" : "No materials yet"}
+              description={materials.length ? "Try a different search or type filter." : "Add your first material using the form."}
+            />
+          ) : (
+            <ul className="grid gap-4 md:grid-cols-2">
+              {filtered.map((m) => (
+                <li key={m.id} className={clsx("card-panel flex flex-col p-5", !m.approved && "border-amber-200")}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2 className="truncate font-semibold text-slate-900">{m.name}</h2>
+                      <p className="mt-0.5 text-xs text-slate-500">{humanize(m.material_type)}</p>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      {m.approved ? <Badge tone="success" dot>Approved</Badge> : <Badge tone="warning" dot>Pending</Badge>}
+                      {!m.is_active && <Badge tone="neutral">Inactive</Badge>}
+                    </div>
+                  </div>
+
+                  <dl className="mt-4 grid grid-cols-3 gap-2 rounded-lg bg-slate-50 p-3 text-center">
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wide text-slate-500">Material</dt>
+                      <dd className="text-sm font-semibold tabular-nums text-slate-900">
+                        {formatINR(m.material_rate)}
+                        <span className="font-normal text-slate-500">/{m.unit?.replace("_", " ")}</span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wide text-slate-500">Labor</dt>
+                      <dd className="text-sm font-semibold tabular-nums text-slate-900">{formatINR(m.labor_rate)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] uppercase tracking-wide text-slate-500">Wastage</dt>
+                      <dd className="text-sm font-semibold tabular-nums text-slate-900">{m.wastage_percent}%</dd>
+                    </div>
+                  </dl>
+
+                  {m.description && <p className="mt-3 line-clamp-2 text-sm text-slate-600">{m.description}</p>}
+                  {m.suitable_regions?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {m.suitable_regions.map((r: string) => (
+                        <Badge key={r} tone="brand">
+                          {humanize(r)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+                    <FileButton
+                      className="btn-outline btn-sm"
+                      busy={busyId === m.id}
+                      onFile={async (f) => {
+                        setBusyId(m.id);
+                        try {
+                          await api.uploadTexture(m.id, f);
+                          toast.success(`Texture added to ${m.name}`);
+                        } catch (err: any) {
+                          toast.error(err.message);
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                    >
+                      Upload texture
+                    </FileButton>
+                    {!m.approved && isAdmin && (
+                      <button
+                        className="btn-primary btn-sm"
+                        disabled={busyId === m.id}
+                        onClick={async () => {
+                          setBusyId(m.id);
+                          try {
+                            await api.updateMaterial(m.id, { approved: true });
+                            toast.success(`${m.name} approved`);
+                            await load();
+                          } catch (err: any) {
+                            toast.error(err.message);
+                          } finally {
+                            setBusyId(null);
+                          }
+                        }}
+                      >
+                        <Icon name="check" /> Approve
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     </div>
   );

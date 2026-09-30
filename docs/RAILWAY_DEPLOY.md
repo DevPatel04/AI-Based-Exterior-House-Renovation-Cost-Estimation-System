@@ -111,7 +111,7 @@ Redeploy backend.
 ## 7) Smoke test
 
 1. Open frontend URL
-2. Register a user (or login seed admin if seeded: `admin@renovation.local` / `admin123` — **change password immediately**)
+2. Register a user (or login seed admin if seeded: `admin@example.com` / `admin123` — **change password immediately**)
 3. Create project → upload image → detect → materials → redesign → estimate → PDF
 
 API docs: `https://YOUR-API.up.railway.app/docs`

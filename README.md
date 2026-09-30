@@ -73,7 +73,7 @@ python -m app.seed
 uvicorn app.main:app --reload --port 8000
 ```
 
-Default admin after seed: `admin@renovation.local` / `admin123`
+Default admin after seed: `admin@example.com` / `admin123`
 
 ### 3. Frontend
 
