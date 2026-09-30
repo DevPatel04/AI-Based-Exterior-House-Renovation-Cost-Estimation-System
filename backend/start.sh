@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
 
+# Always run from backend root (directory containing this script)
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+# Railway/Nixpacks often don't put the service root on PYTHONPATH
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+echo "Working dir: $ROOT"
+echo "PYTHONPATH: $PYTHONPATH"
 echo "Running migrations..."
 alembic upgrade head
 
