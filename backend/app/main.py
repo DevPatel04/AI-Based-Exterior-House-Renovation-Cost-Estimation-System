@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth
+from app.api import auth, projects
 from app.core.config import get_settings
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.2.0")
+app = FastAPI(title=settings.app_name, version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,6 +16,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(projects.router)
 
 
 @app.get("/health")
@@ -23,5 +24,5 @@ def health():
     return {
         "status": "ok",
         "app": settings.app_name,
-        "phase": "02-auth-rbac",
+        "phase": "03-projects",
     }
