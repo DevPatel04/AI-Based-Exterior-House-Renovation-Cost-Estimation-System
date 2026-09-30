@@ -4,11 +4,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, designs, estimation, images, materials, projects, regions
+from app.api import auth, designs, estimation, images, materials, projects, regions, reports
 from app.core.config import get_settings
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.8.0")
+app = FastAPI(title=settings.app_name, version="0.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +31,7 @@ app.include_router(regions.router)
 app.include_router(materials.router)
 app.include_router(designs.router)
 app.include_router(estimation.router)
+app.include_router(reports.router)
 
 
 @app.get("/health")
@@ -38,5 +39,5 @@ def health():
     return {
         "status": "ok",
         "app": settings.app_name,
-        "phase": "08-estimation",
+        "phase": "09-reports",
     }
