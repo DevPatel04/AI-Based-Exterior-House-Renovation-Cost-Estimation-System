@@ -33,6 +33,21 @@ def _get_project_or_404(db: Session, project_id: int, user: User) -> Project:
     return project
 
 
+def _get_project_for_edit(db: Session, project_id: int, user: User) -> Project:
+    """Like _get_project_or_404, but requires owner/admin or editor membership."""
+    project = _get_project_or_404(db, project_id, user)
+    if project.owner_id == user.id or "admin" in get_user_role_names(user):
+        return project
+    member = (
+        db.query(ProjectMember)
+        .filter(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id)
+        .first()
+    )
+    if member and member.member_role in {MemberRole.owner, MemberRole.editor}:
+        return project
+    raise HTTPException(status_code=403, detail="You need edit access for this project")
+
+
 @router.get("", response_model=list[ProjectOut])
 def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     roles = get_user_role_names(user)
