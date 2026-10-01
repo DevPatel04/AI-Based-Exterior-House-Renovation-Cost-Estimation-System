@@ -94,6 +94,16 @@ See `backend/.env.example` and `frontend/.env.example` for Gemini, Cloudflare, a
 
 Never put API keys or GitHub tokens in git remotes or commits. Revoke any token that was accidentally exposed.
 
-## Feature backlog
+## Documentation
 
-See [Feature_List_and_Tech_Stack.md](./Feature_List_and_Tech_Stack.md) and [docs/](./docs/).
+Written deliverables for the prototype:
+
+| Document | Contents |
+|----------|----------|
+| [docs/architecture.md](./docs/architecture.md) | System architecture |
+| [docs/user-workflows.md](./docs/user-workflows.md) | User workflows by role |
+| [docs/prototype.md](./docs/prototype.md) | How to demonstrate upload, materials, redesign, area, and cost |
+| [docs/estimation-method.md](./docs/estimation-method.md) | How estimation works |
+| [docs/limitations.md](./docs/limitations.md) | Limitations |
+
+Index: [docs/README.md](./docs/README.md). Requirement mapping: [Feature_List_and_Tech_Stack.md](./Feature_List_and_Tech_Stack.md).
