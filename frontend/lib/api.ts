@@ -31,12 +31,21 @@ export function getToken(): string | null {
   return localStorage.getItem("token");
 }
 
+/** Notify AppShell that login/logout changed the token (layout does not remount). */
+function emitAuthChange() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("facadeplan-auth"));
+  }
+}
+
 export function setToken(token: string) {
   localStorage.setItem("token", token);
+  emitAuthChange();
 }
 
 export function clearToken() {
   localStorage.removeItem("token");
+  emitAuthChange();
 }
 
 /** Turn FastAPI error payloads (string or 422 validation list) into a readable sentence. */

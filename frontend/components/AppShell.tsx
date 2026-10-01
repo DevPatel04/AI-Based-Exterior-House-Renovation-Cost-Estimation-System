@@ -50,37 +50,46 @@ export default function AppShell({ children }: { children: ReactNode }) {
   }, [pathname]);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) {
-      setUser(null);
-      setLoading(false);
-      if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
-      return;
-    }
     let cancelled = false;
-    api
-      .me()
-      .then((me) => {
+
+    async function loadSession() {
+      const token = getToken();
+      if (!token) {
+        if (!cancelled) {
+          setUser(null);
+          setLoading(false);
+        }
+        if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
+        return;
+      }
+      if (!cancelled) setLoading(true);
+      try {
+        const me = await api.me();
         if (!cancelled) setUser(me);
-      })
-      .catch((err: any) => {
+      } catch (err: any) {
         const msg = String(err?.message || "");
-        // Only clear session on auth failures, not transient network/5xx
+        // Clear session on auth failures. On network/5xx keep token but stop gating forever.
         if (msg.includes("401") || /not authenticated|credentials|unauthorized/i.test(msg)) {
           clearToken();
-          setUser(null);
+          if (!cancelled) setUser(null);
           if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
+        } else if (!cancelled) {
+          // Transient failure: don't leave the UI stuck on "Checking your session…"
+          setUser(null);
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    }
+
+    void loadSession();
+    const onAuth = () => void loadSession();
+    window.addEventListener("facadeplan-auth", onAuth);
     return () => {
       cancelled = true;
+      window.removeEventListener("facadeplan-auth", onAuth);
     };
-    // Fetch once per mount / token — not on every pathname change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pathname, router]);
 
   const roles: string[] = user?.roles?.map((r: any) => r.name) || [];
   const logout = useCallback(() => {
@@ -114,8 +123,8 @@ export default function AppShell({ children }: { children: ReactNode }) {
   ];
   const visibleNav = nav.filter((n) => n.show);
 
-  // Protected pages wait for the session check instead of flashing content / errors.
-  const gate = !isPublic && !user;
+  // Gate only while we still need a user (e.g. right after login). Don't flash on every nav.
+  const gate = !isPublic && loading && !user;
 
   return (
     <AuthContext.Provider value={{ user, roles, loading, refreshUser, logout }}>
