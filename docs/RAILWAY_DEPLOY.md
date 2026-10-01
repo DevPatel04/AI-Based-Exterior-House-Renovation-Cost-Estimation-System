@@ -48,7 +48,9 @@ git push origin develop
 | Variable                | Value                                                          |
 | ----------------------- | -------------------------------------------------------------- |
 | `DATABASE_URL`          | `${{Postgres.DATABASE_URL}}` (Railway reference)               |
-| `SECRET_KEY`            | long random string                                             |
+| `SECRET_KEY`             | long random string (32+ chars) — required outside development |
+| `ADMIN_EMAIL`            | optional; only creates seed admin when set with ADMIN_PASSWORD |
+| `ADMIN_PASSWORD`         | optional; never use `admin123` in production                   |
 | `ENVIRONMENT`           | `production`                                                   |
 | `CORS_ORIGINS`          | your frontend URL, e.g. `https://frontend-xxxx.up.railway.app` |
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
@@ -111,7 +113,7 @@ Redeploy backend.
 ## 7) Smoke test
 
 1. Open frontend URL
-2. Register a user (or login seed admin if seeded: `admin@example.com` / `admin123` — **change password immediately**)
+2. Register a user (or login with the admin you created via `ADMIN_EMAIL` / `ADMIN_PASSWORD`)
 3. Create project → upload image → detect → materials → redesign → estimate → PDF
 
 API docs: `https://YOUR-API.up.railway.app/docs`
@@ -126,7 +128,7 @@ API docs: `https://YOUR-API.up.railway.app/docs`
 | `CORS_ORIGINS`           | Must match frontend HTTPS URL                                 |
 | `NEXT_PUBLIC_API_URL`    | Browser calls API on Railway                                  |
 | `UPLOAD_DIR` + Volume    | Files persist across deploys                                  |
-| Default admin password   | Seed creates `admin123` — change it                           |
+| Default admin            | Only if `ADMIN_EMAIL` + `ADMIN_PASSWORD` are set              |
 | Gemini / Cloudflare keys | Needed for real AI; without them redesign uses local fallback |
 | Branch                   | Deploy from `develop` or synced `main`                        |
 

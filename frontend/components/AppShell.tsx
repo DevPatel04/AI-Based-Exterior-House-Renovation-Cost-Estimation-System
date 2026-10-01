@@ -47,6 +47,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
     const token = getToken();
     if (!token) {
       setUser(null);
@@ -54,17 +57,30 @@ export default function AppShell({ children }: { children: ReactNode }) {
       if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
       return;
     }
+    let cancelled = false;
     api
       .me()
-      .then(setUser)
-      .catch(() => {
-        clearToken();
-        setUser(null);
-        if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
+      .then((me) => {
+        if (!cancelled) setUser(me);
       })
-      .finally(() => setLoading(false));
+      .catch((err: any) => {
+        const msg = String(err?.message || "");
+        // Only clear session on auth failures, not transient network/5xx
+        if (msg.includes("401") || /not authenticated|credentials|unauthorized/i.test(msg)) {
+          clearToken();
+          setUser(null);
+          if (!PUBLIC_PATHS.includes(pathname)) router.push("/login");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Fetch once per mount / token — not on every pathname change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  }, []);
 
   const roles: string[] = user?.roles?.map((r: any) => r.name) || [];
   const logout = useCallback(() => {

@@ -30,7 +30,11 @@ async def detect_regions(
         raise HTTPException(status_code=400, detail="Upload an exterior image first")
 
     detected = await detect_structure_regions(absolute_path(image.file_path))
-    db.query(StructureRegion).filter(StructureRegion.project_id == project.id).delete()
+    # Keep manually corrected regions; only wipe auto-detected ones
+    db.query(StructureRegion).filter(
+        StructureRegion.project_id == project.id,
+        StructureRegion.user_corrected.is_(False),
+    ).delete()
     created = []
     for item in detected:
         region = StructureRegion(

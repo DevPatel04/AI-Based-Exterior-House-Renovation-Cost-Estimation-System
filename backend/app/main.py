@@ -2,13 +2,20 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, designs, estimation, images, materials, projects, regions, reports
 from app.core.config import get_settings
+from app.core.database import SessionLocal
+from app.services.storage import ensure_upload_dirs
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="1.0.0")
+app = FastAPI(
+    title=settings.app_name,
+    version="1.0.0",
+    docs_url=None if settings.environment.lower() == "production" else "/docs",
+    redoc_url=None if settings.environment.lower() == "production" else "/redoc",
+    openapi_url=None if settings.environment.lower() == "production" else "/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,11 +25,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.services.storage import ensure_upload_dirs
-
 ensure_upload_dirs()
-upload_root = Path(settings.upload_dir)
-app.mount("/files", StaticFiles(directory=str(upload_root)), name="files")
+# Intentionally no public /files mount — serve only via authenticated API routes.
 
 app.include_router(auth.router)
 app.include_router(projects.router)
@@ -36,8 +40,18 @@ app.include_router(reports.router)
 
 @app.get("/health")
 def health():
+    db_ok = False
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(__import__("sqlalchemy").text("SELECT 1"))
+            db_ok = True
+        finally:
+            db.close()
+    except Exception:
+        db_ok = False
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
         "app": settings.app_name,
-        "phase": "10-complete",
+        "database": "up" if db_ok else "down",
     }

@@ -1,8 +1,15 @@
 from functools import lru_cache
 from urllib.parse import quote_plus
 
-from pydantic import computed_field
+from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+WEAK_SECRETS = {
+    "",
+    "change-me-in-production",
+    "change-me-to-a-long-random-string",
+    "your-secret-key",
+}
 
 
 class Settings(BaseSettings):
@@ -13,17 +20,19 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = 1440
 
-    # Edit these in .env — DATABASE_URL is built automatically
     db_user: str = "your_db_username"
     db_password: str = "your_db_password"
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "renovation"
-    # Optional override. Leave empty to use DB_* fields above.
     database_url: str = ""
 
     upload_dir: str = "uploads"
     cors_origins: str = "http://localhost:3000"
+
+    # Seed admin only when both are set (never hard-code a production password)
+    admin_email: str = ""
+    admin_password: str = ""
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.0-flash"
@@ -40,12 +49,21 @@ class Settings(BaseSettings):
     default_window_height_ft: float = 4.0
     default_wastage_percent: float = 10.0
 
+    @model_validator(mode="after")
+    def _reject_weak_secret_in_production(self):
+        if self.environment.lower() not in {"development", "dev", "test", "local"}:
+            key = (self.secret_key or "").strip()
+            if key in WEAK_SECRETS or len(key) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be a strong random value (32+ chars) when ENVIRONMENT is not development"
+                )
+        return self
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def sqlalchemy_database_url(self) -> str:
         if self.database_url.strip():
             url = self.database_url.strip()
-            # Railway / Heroku often provide postgres:// — SQLAlchemy needs psycopg2 driver
             if url.startswith("postgres://"):
                 url = url.replace("postgres://", "postgresql+psycopg2://", 1)
             elif url.startswith("postgresql://") and "+psycopg2" not in url:

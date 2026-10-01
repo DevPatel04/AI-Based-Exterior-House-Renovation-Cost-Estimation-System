@@ -1,4 +1,5 @@
 import uuid
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -59,14 +60,14 @@ def generate_project_report(
             story.append(RLImage(str(logo), width=1.6 * inch, height=0.7 * inch, kind="proportional"))
             story.append(Spacer(1, 0.1 * inch))
             company = brand_user.company or brand_user.full_name
-            story.append(Paragraph(f"<b>{company}</b>", styles["Normal"]))
+            story.append(Paragraph(f"<b>{escape(company)}</b>", styles["Normal"]))
             story.append(Spacer(1, 0.15 * inch))
 
     story.append(Paragraph("Exterior Renovation Planning Report", styles["Title"]))
     story.append(Spacer(1, 0.2 * inch))
-    story.append(Paragraph(f"Project: <b>{project.title}</b>", styles["Normal"]))
+    story.append(Paragraph(f"Project: <b>{escape(project.title)}</b>", styles["Normal"]))
     if project.description:
-        story.append(Paragraph(project.description, styles["Normal"]))
+        story.append(Paragraph(escape(project.description), styles["Normal"]))
     story.append(Spacer(1, 0.15 * inch))
     story.append(
         Paragraph(
@@ -86,7 +87,7 @@ def generate_project_report(
     if design and design.redesign_path:
         redes = absolute_path(design.redesign_path)
         if redes.exists():
-            story.append(Paragraph(f"Redesign: {design.name}", styles["Heading2"]))
+            story.append(Paragraph(f"Redesign: {escape(design.name)}", styles["Heading2"]))
             story.append(RLImage(str(redes), width=5.5 * inch, height=3.5 * inch, kind="proportional"))
             story.append(Spacer(1, 0.2 * inch))
 

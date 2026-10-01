@@ -18,22 +18,22 @@ class Token(BaseModel):
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
-    full_name: str
-    phone: str | None = None
-    company: str | None = None
+    password: str = Field(min_length=8, max_length=72)
+    full_name: str = Field(min_length=1, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    company: str | None = Field(default=None, max_length=255)
     role: RoleName = RoleName.homeowner
 
 
 class UserUpdate(BaseModel):
-    full_name: str | None = None
-    phone: str | None = None
-    company: str | None = None
+    full_name: str | None = Field(default=None, min_length=1, max_length=255)
+    phone: str | None = Field(default=None, max_length=50)
+    company: str | None = Field(default=None, max_length=255)
 
 
 class PasswordChange(BaseModel):
-    current_password: str = Field(min_length=1)
-    new_password: str = Field(min_length=6)
+    current_password: str = Field(min_length=1, max_length=72)
+    new_password: str = Field(min_length=8, max_length=72)
 
 
 class RoleOut(BaseModel):
@@ -63,13 +63,13 @@ class AssignRoleIn(BaseModel):
 
 
 class ProjectCreate(BaseModel):
-    title: str
-    description: str | None = None
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=5000)
 
 
 class ProjectUpdate(BaseModel):
-    title: str | None = None
-    description: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=5000)
     status: ProjectStatus | None = None
     is_archived: bool | None = None
 
@@ -83,7 +83,7 @@ class ProjectMemberOut(BaseModel):
     id: int
     user_id: int
     member_role: MemberRole
-    email: EmailStr | None = None
+    email: str | None = None
     full_name: str | None = None
 
     model_config = {"from_attributes": True}
@@ -117,22 +117,22 @@ class ImageOut(BaseModel):
 
 
 class Point(BaseModel):
-    x: float
-    y: float
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
 
 
 class RegionCreate(BaseModel):
     region_type: RegionType
-    label: str | None = None
-    points: list[Point]
-    confidence: float | None = None
+    label: str | None = Field(default=None, max_length=255)
+    points: list[Point] = Field(min_length=3)
+    confidence: float | None = Field(default=None, ge=0, le=1)
     user_corrected: bool = False
 
 
 class RegionUpdate(BaseModel):
     region_type: RegionType | None = None
-    label: str | None = None
-    points: list[Point] | None = None
+    label: str | None = Field(default=None, max_length=255)
+    points: list[Point] | None = Field(default=None, min_length=3)
     user_corrected: bool | None = True
 
 
@@ -149,27 +149,27 @@ class RegionOut(BaseModel):
 
 
 class MaterialCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=255)
     material_type: MaterialType
     description: str | None = None
-    unit: str = "sq_ft"
-    coverage_per_unit: float = 1.0
-    wastage_percent: float = 10.0
-    material_rate: float
-    labor_rate: float
+    unit: str = Field(default="sq_ft", max_length=50)
+    coverage_per_unit: float = Field(default=1.0, gt=0)
+    wastage_percent: float = Field(default=10.0, ge=0, le=100)
+    material_rate: float = Field(ge=0)
+    labor_rate: float = Field(ge=0)
     durability_notes: str | None = None
     maintenance_notes: str | None = None
     suitable_regions: list[str] | None = None
 
 
 class MaterialUpdate(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
-    unit: str | None = None
-    coverage_per_unit: float | None = None
-    wastage_percent: float | None = None
-    material_rate: float | None = None
-    labor_rate: float | None = None
+    unit: str | None = Field(default=None, max_length=50)
+    coverage_per_unit: float | None = Field(default=None, gt=0)
+    wastage_percent: float | None = Field(default=None, ge=0, le=100)
+    material_rate: float | None = Field(default=None, ge=0)
+    labor_rate: float | None = Field(default=None, ge=0)
     durability_notes: str | None = None
     maintenance_notes: str | None = None
     suitable_regions: list[str] | None = None
@@ -197,12 +197,12 @@ class MaterialOut(BaseModel):
 
 
 class DesignCreate(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=255)
 
 
 class DesignRegionMaterialIn(BaseModel):
-    region_id: int
-    material_id: int
+    region_id: int = Field(gt=0)
+    material_id: int = Field(gt=0)
 
 
 class DesignOut(BaseModel):
@@ -225,8 +225,8 @@ class VisualizeRequest(BaseModel):
 class AreaOverrideIn(BaseModel):
     region_id: int | None = None
     region_type: RegionType
-    area_sq_ft: float
-    length_ft: float | None = None
+    area_sq_ft: float = Field(ge=0)
+    length_ft: float | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
@@ -246,7 +246,7 @@ class AreaEstimateOut(BaseModel):
 
 class QuantityOverrideIn(BaseModel):
     quantity_line_id: int
-    final_quantity: float
+    final_quantity: float = Field(ge=0)
 
 
 class QuantityLineOut(BaseModel):
@@ -264,9 +264,9 @@ class QuantityLineOut(BaseModel):
 
 
 class RateOverrideIn(BaseModel):
-    material_id: int
-    material_rate: float | None = None
-    labor_rate: float | None = None
+    material_id: int = Field(gt=0)
+    material_rate: float | None = Field(default=None, ge=0)
+    labor_rate: float | None = Field(default=None, ge=0)
 
 
 class CostLineOut(BaseModel):
@@ -304,6 +304,7 @@ class ReportOut(BaseModel):
 
 
 class ReferenceMeasurements(BaseModel):
-    known_width_ft: float | None = None
-    known_height_ft: float | None = None
+    known_width_ft: float | None = Field(default=None, gt=0)
+    known_height_ft: float | None = Field(default=None, gt=0)
     reference_object: str | None = "door"
+

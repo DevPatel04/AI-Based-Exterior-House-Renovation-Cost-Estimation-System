@@ -46,7 +46,16 @@ def estimate_areas(
     db.flush()
 
     results: list[AreaEstimate] = []
+    override_region_ids = {
+        a.region_id
+        for a in db.query(AreaEstimate)
+        .filter(AreaEstimate.project_id == project.id, AreaEstimate.user_override.is_(True))
+        .all()
+        if a.region_id is not None
+    }
     for region in project.regions:
+        if region.id in override_region_ids:
+            continue
         norm_area = _polygon_area_norm(region.points or [])
         area_sq_ft = norm_area * facade_width_ft * facade_height_ft
         length_ft = None
@@ -56,7 +65,6 @@ def estimate_areas(
             if region.region_type == RegionType.railing:
                 area_sq_ft = length_ft * 3.0  # assume 3 ft railing height
 
-        # Subtract openings roughly for main walls later via quantities
         est = AreaEstimate(
             project_id=project.id,
             region_id=region.id,
@@ -73,7 +81,13 @@ def estimate_areas(
     db.commit()
     for r in results:
         db.refresh(r)
-    return results
+    # Return overrides + fresh autos for UI
+    return (
+        db.query(AreaEstimate)
+        .filter(AreaEstimate.project_id == project.id)
+        .order_by(AreaEstimate.region_id, AreaEstimate.user_override.desc())
+        .all()
+    )
 
 
 def calculate_quantities_and_costs(db: Session, project: Project, design: Design | None = None) -> dict:
@@ -103,11 +117,17 @@ def calculate_quantities_and_costs(db: Session, project: Project, design: Design
         o.material_id: o
         for o in db.query(RateOverride).filter(RateOverride.project_id == project.id).all()
     }
-    areas_by_region = {
-        a.region_id: a
-        for a in db.query(AreaEstimate).filter(AreaEstimate.project_id == project.id).all()
-        if a.region_id is not None
-    }
+    areas_by_region: dict[int, AreaEstimate] = {}
+    for a in db.query(AreaEstimate).filter(AreaEstimate.project_id == project.id).all():
+        if a.region_id is None:
+            continue
+        prev = areas_by_region.get(a.region_id)
+        # Prefer user overrides over auto estimates
+        if prev is None or (a.user_override and not prev.user_override):
+            areas_by_region[a.region_id] = a
+        elif a.user_override == prev.user_override and a.id > prev.id:
+            areas_by_region[a.region_id] = a
+
 
     # Aggregate by material
     agg: dict[int, dict] = {}
@@ -144,14 +164,18 @@ def calculate_quantities_and_costs(db: Session, project: Project, design: Design
     material_total = 0.0
     labor_total = 0.0
 
+    # Drop quantity overrides for materials no longer in this design
+    for mid, qline in list(kept_qty.items()):
+        if mid not in agg:
+            db.delete(qline)
+            del kept_qty[mid]
+
     for mid, data in agg.items():
         material: Material = data["material"]
         if mid in kept_qty:
             qline = kept_qty[mid]
             qty_lines.append(qline)
             final_q = qline.final_quantity
-            wastage = qline.wastage_percent
-            base = qline.base_quantity
         else:
             wastage = material.wastage_percent
             base = round(data["base"], 3)

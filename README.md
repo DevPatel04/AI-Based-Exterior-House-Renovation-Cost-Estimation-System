@@ -73,7 +73,7 @@ python -m app.seed
 uvicorn app.main:app --reload --port 8000
 ```
 
-Default admin after seed: `admin@example.com` / `admin123`
+Default admin after seed: set `ADMIN_EMAIL` + `ADMIN_PASSWORD` in the environment (not created automatically in production with a weak password).
 
 ### 3. Frontend
 

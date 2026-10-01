@@ -56,7 +56,7 @@ export default function CatalogPage() {
 
   const load = () =>
     api
-      .listMaterials()
+      .listMaterials(true)
       .then((m) => {
         setMaterials(m);
         setError("");

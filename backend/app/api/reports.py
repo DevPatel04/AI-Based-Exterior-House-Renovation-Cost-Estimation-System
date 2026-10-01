@@ -22,9 +22,10 @@ def create_report(
 ):
     project = _get_project_or_404(db, project_id, user)
     design = None
-    if design_id:
+    if design_id is not None:
         design = db.query(Design).filter(Design.id == design_id, Design.project_id == project.id).first()
-    # Prefer the downloading user's logo for consultant/contractor branding
+        if not design:
+            raise HTTPException(status_code=404, detail="Design not found")
     report = generate_project_report(db, project, design, branding_user=user)
     return report
 

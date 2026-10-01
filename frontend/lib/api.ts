@@ -91,7 +91,16 @@ export const api = {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
     });
-    if (!res.ok) throw new Error("Login failed");
+    if (!res.ok) {
+      let detail = "Login failed";
+      try {
+        const data = await res.json();
+        detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
     return res.json() as Promise<{ access_token: string }>;
   },
   me: () => request<any>("/api/auth/me"),
@@ -146,7 +155,8 @@ export const api = {
     }),
   deleteRegion: (projectId: number, regionId: number) =>
     request(`/api/projects/${projectId}/regions/${regionId}`, { method: "DELETE" }),
-  listMaterials: () => request<any[]>("/api/materials"),
+  listMaterials: (includeInactive = false) =>
+    request<any[]>(`/api/materials${includeInactive ? "?include_inactive=true" : ""}`),
   createMaterial: (body: object) =>
     request("/api/materials", { method: "POST", body: JSON.stringify(body) }),
   updateMaterial: (id: number, body: object) =>

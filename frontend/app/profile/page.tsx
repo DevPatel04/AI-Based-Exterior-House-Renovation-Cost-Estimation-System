@@ -57,7 +57,7 @@ export default function ProfilePage() {
   async function onChangePassword(e: FormEvent) {
     e.preventDefault();
     if (pw.new_password.length < 6) {
-      toast.error("New password must be at least 6 characters.");
+      toast.error("New password must be at least 8 characters.");
       return;
     }
     if (pw.new_password !== pw.confirm) {
@@ -190,7 +190,7 @@ export default function ProfilePage() {
                   type="password"
                   className="input"
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={8}
                   value={pw.new_password}
                   onChange={(e) => setPw({ ...pw, new_password: e.target.value })}
                   required
@@ -204,7 +204,7 @@ export default function ProfilePage() {
                   type="password"
                   className="input"
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={8}
                   value={pw.confirm}
                   onChange={(e) => setPw({ ...pw, confirm: e.target.value })}
                   required

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_permission
-from app.api.projects import _get_project_or_404
+from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
 from app.models import AreaEstimate, ProjectImage, QuantityLine, RateOverride, RegionType, User
 from app.schemas import (
@@ -27,7 +27,7 @@ def run_area_estimation(
     user: User = Depends(require_permission("project:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     image = (
         db.query(ProjectImage)
         .filter(ProjectImage.project_id == project.id, ProjectImage.is_primary.is_(True))
@@ -57,7 +57,26 @@ def override_area(
     user: User = Depends(require_permission("areas:override")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
+    existing = (
+        db.query(AreaEstimate)
+        .filter(
+            AreaEstimate.project_id == project.id,
+            AreaEstimate.region_id == payload.region_id,
+            AreaEstimate.user_override.is_(True),
+        )
+        .first()
+    )
+    if existing:
+        existing.region_type = payload.region_type
+        existing.area_sq_ft = payload.area_sq_ft
+        existing.length_ft = payload.length_ft
+        existing.notes = payload.notes
+        existing.method = "user_override"
+        existing.confidence = 1.0
+        db.commit()
+        db.refresh(existing)
+        return existing
     est = AreaEstimate(
         project_id=project.id,
         region_id=payload.region_id,
@@ -81,7 +100,7 @@ def calculate(
     user: User = Depends(require_permission("project:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     result = calculate_quantities_and_costs(db, project)
     return CostSummaryOut(
         lines=result["costs"],
@@ -104,7 +123,7 @@ def override_quantity(
     user: User = Depends(require_permission("quantities:override")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     line = (
         db.query(QuantityLine)
         .filter(QuantityLine.id == payload.quantity_line_id, QuantityLine.project_id == project.id)
@@ -128,7 +147,7 @@ def set_rates(
     user: User = Depends(require_permission("rates:edit")),
     db: Session = Depends(get_db),
 ):
-    project = _get_project_or_404(db, project_id, user)
+    project = _get_project_for_edit(db, project_id, user)
     existing = (
         db.query(RateOverride)
         .filter(RateOverride.project_id == project.id, RateOverride.material_id == payload.material_id)
