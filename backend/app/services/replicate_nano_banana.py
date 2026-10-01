@@ -56,9 +56,11 @@ async def generate_nano_banana_redesign(
     source_path: Path,
     prompt: str,
     hq_mode: bool = False,
+    guide_path: Path | None = None,
+    texture_paths: list[Path] | None = None,
 ) -> tuple[str | None, str | None]:
     """
-    Call google/nano-banana-2 with the house photo as image_input.
+    Call google/nano-banana-2 with the house photo (+ optional material guide / textures).
     Returns (relative_path, error_message).
     """
     settings = get_settings()
@@ -68,15 +70,36 @@ async def generate_nano_banana_redesign(
 
     model = (settings.nano_banana_model or "google/nano-banana-2").strip()
     try:
-        image_uri = _data_uri_jpeg(source_path, max_edge=2048 if hq_mode else 1536)
+        image_inputs: list[str] = [
+            _data_uri_jpeg(source_path, max_edge=2048 if hq_mode else 1536)
+        ]
+        if guide_path is not None and guide_path.exists():
+            image_inputs.append(_data_uri_jpeg(guide_path, max_edge=1536))
+        for tp in (texture_paths or [])[:4]:
+            if tp.exists():
+                image_inputs.append(_data_uri_jpeg(tp, max_edge=512))
     except Exception as exc:
         return None, f"could not read image: {exc}"
 
     resolution = "2K" if hq_mode else (settings.nano_banana_resolution or "1K")
+    if guide_path is not None and guide_path.exists():
+        edit_prompt = (
+            f"{prompt} "
+            "Image 1 is the original house photo. Image 2 shows the user's selected materials "
+            "already mapped onto each region — make Image 1 look photorealistically renovated "
+            "with THOSE EXACT materials on those SAME parts. Do not invent other finishes. "
+            "Keep identical architecture and camera angle."
+        )
+    else:
+        edit_prompt = (
+            f"{prompt} "
+            "Apply the listed materials ONLY on their named regions. "
+            "Make the renovation clearly visible. Keep identical architecture. Photoreal only."
+        )
     payload = {
         "input": {
-            "prompt": prompt,
-            "image_input": [image_uri],
+            "prompt": edit_prompt,
+            "image_input": image_inputs,
             "aspect_ratio": "match_input_image",
             "resolution": resolution,
             "output_format": "jpg",

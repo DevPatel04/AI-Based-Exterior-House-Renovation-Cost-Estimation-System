@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     nano_banana_resolution: str = "1K"  # 1K | 2K | 4K (HQ uses 2K)
     enable_replicate_img2img: bool = True
     replicate_img2img_model: str = "lucataco/sdxl"
-    replicate_img2img_strength: float = 0.32  # lower = closer to original photo (less cartoon)
+    replicate_img2img_strength: float = 0.45  # visible material change while keeping photo structure
     replicate_img2img_steps: int = 28
     enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"

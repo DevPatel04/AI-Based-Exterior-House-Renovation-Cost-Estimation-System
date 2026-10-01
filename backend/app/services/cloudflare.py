@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 import httpx
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from app.core.config import get_settings
 from app.services.storage import ensure_upload_dirs
@@ -30,47 +30,73 @@ async def generate_redesign(
     source_path: Path,
     prompt: str,
     hq_mode: bool = False,
+    assignments: list | None = None,
 ) -> tuple[str, str, list[str]]:
     """
     Returns (relative_path, engine_used, failure_notes).
 
-    Quality-first order (photorealistic, accurate facade):
-      1) Replicate google/nano-banana-2 (Google image edit from photo)
-      2) Replicate SDXL img2img
-      3) Replicate SDXL ControlNet
-      4) fal.ai ControlNet
-      5) Photoreal photo edit (always keeps real geometry)
-      6) Cloudflare Workers AI only if ENABLE_CLOUDFLARE_REDESIGN=true
-      7) Hugging Face / Gemini HQ (optional)
-      8) Local fallback if ALLOW_LOCAL_REDESIGN_FALLBACK=true
+    Applies user-selected materials onto each region polygon first, then AI.
     """
+    from app.services.material_regions import (
+        RegionMaterialAssignment,
+        apply_region_materials,
+        mask_ai_to_regions,
+    )
+    from app.services.storage import absolute_path as abs_upload
+
     settings = get_settings()
     notes: list[str] = []
     has_replicate = bool((settings.replicate_api_token or "").strip())
+    region_assignments: list[RegionMaterialAssignment] = [
+        a for a in (assignments or []) if isinstance(a, RegionMaterialAssignment)
+    ]
     logger.info(
-        "REDESIGN begin hq=%s replicate=%s nano=%s img2img=%s controlnet=%s fal=%s cloudflare=%s hf=%s local_ok=%s",
+        "REDESIGN begin hq=%s regions=%s replicate=%s nano=%s",
         hq_mode,
+        len(region_assignments),
         has_replicate,
         bool(has_replicate and settings.enable_nano_banana),
-        bool(has_replicate and settings.enable_replicate_img2img),
-        bool(has_replicate and settings.enable_replicate_controlnet),
-        bool((settings.fal_key or "").strip() and settings.enable_fal_controlnet),
-        bool(
-            settings.enable_cloudflare_redesign
-            and settings.cloudflare_account_id
-            and settings.cloudflare_api_token
-        ),
-        bool((settings.hf_token or "").strip() and settings.enable_hf_img2img),
-        bool(settings.allow_local_redesign_fallback),
     )
 
-    # 1) Google Nano Banana 2 — best photoreal edit from the house photo
+    material_guide_rel: str | None = None
+    material_guide_path: Path | None = None
+    if region_assignments:
+        material_guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.85)
+        if material_guide_rel:
+            material_guide_path = abs_upload(material_guide_rel)
+            logger.info("REDESIGN material_guide ready path=%s", material_guide_rel)
+            notes.append(f"material_guide: applied {len(region_assignments)} region materials")
+        else:
+            notes.append("material_guide: failed to paint region materials")
+
+    texture_paths: list[Path] = []
+    for a in region_assignments:
+        if a.texture_path:
+            try:
+                tp = abs_upload(a.texture_path)
+                if tp.exists() and tp not in texture_paths:
+                    texture_paths.append(tp)
+            except Exception:
+                pass
+
+    def _finalize_ai(path: str, weight: float = 0.72) -> str:
+        if region_assignments:
+            return mask_ai_to_regions(source_path, path, region_assignments, ai_weight=weight)
+        return path
+
     if has_replicate and settings.enable_nano_banana:
         from app.services.replicate_nano_banana import generate_nano_banana_redesign
 
         logger.info("REDESIGN try nano_banana")
-        path, err = await generate_nano_banana_redesign(source_path, prompt, hq_mode=hq_mode)
+        path, err = await generate_nano_banana_redesign(
+            source_path,
+            prompt,
+            hq_mode=hq_mode,
+            guide_path=material_guide_path,
+            texture_paths=texture_paths,
+        )
         if path:
+            path = _finalize_ai(path, 0.78)
             logger.info("REDESIGN ok engine=nano_banana path=%s", path)
             return path, "nano_banana", notes
         notes.append(f"nano_banana: {err or 'failed'}")
@@ -78,13 +104,14 @@ async def generate_redesign(
     else:
         notes.append("nano_banana: skipped (token missing or ENABLE_NANO_BANANA=false)")
 
-    # 2) Replicate SDXL img2img — backup from the real photo
     if has_replicate and settings.enable_replicate_img2img:
         from app.services.replicate_img2img import generate_replicate_img2img_redesign
 
         logger.info("REDESIGN try replicate_img2img")
-        path, err = await generate_replicate_img2img_redesign(source_path, prompt, hq_mode=hq_mode)
+        img2img_src = material_guide_path if material_guide_path else source_path
+        path, err = await generate_replicate_img2img_redesign(img2img_src, prompt, hq_mode=hq_mode)
         if path:
+            path = _finalize_ai(path, 0.7)
             logger.info("REDESIGN ok engine=replicate_img2img path=%s", path)
             return path, "replicate_img2img", notes
         notes.append(f"replicate_img2img: {err or 'failed'}")
@@ -92,15 +119,14 @@ async def generate_redesign(
     else:
         notes.append("replicate_img2img: skipped (token missing or ENABLE_REPLICATE_IMG2IMG=false)")
 
-    # 3) Replicate ControlNet — structure lock backup
     if has_replicate and settings.enable_replicate_controlnet:
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
 
         logger.info("REDESIGN try replicate_controlnet")
         path, err = await generate_replicate_controlnet_redesign(source_path, prompt)
         if path:
-            # Soft-blend keeps photo realism if ControlNet drifts toward illustration
             path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.55 if hq_mode else 0.45)
+            path = _finalize_ai(path, 0.65)
             logger.info("REDESIGN ok engine=replicate_controlnet path=%s", path)
             return path, "replicate_controlnet", notes
         notes.append(f"replicate_controlnet: {err or 'failed'}")
@@ -108,7 +134,6 @@ async def generate_redesign(
     else:
         notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
-    # 4) fal ControlNet
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
 
@@ -116,6 +141,7 @@ async def generate_redesign(
         path = await generate_fal_controlnet_redesign(source_path, prompt)
         if path:
             path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.5)
+            path = _finalize_ai(path, 0.65)
             logger.info("REDESIGN ok engine=fal_controlnet path=%s", path)
             return path, "fal_controlnet", notes
         notes.append("fal_controlnet: request failed (403/credits)")
@@ -123,14 +149,17 @@ async def generate_redesign(
     else:
         notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
 
-    # 5) Photoreal photo edit — keeps the real house photo, applies material color/finish hints
+    # Guaranteed: selected materials on each region polygon
+    if material_guide_rel:
+        logger.info("REDESIGN ok engine=region_materials path=%s", material_guide_rel)
+        return material_guide_rel, "region_materials", notes
+
     logger.info("REDESIGN try photo_edit")
     path = _photoreal_photo_edit(source_path, prompt)
     if path:
         logger.info("REDESIGN ok engine=photo_edit path=%s", path)
         return path, "photo_edit", notes
 
-    # 6) Cloudflare — optional; always blended onto the real photo (txt2img alone looks cartoon)
     if (
         settings.enable_cloudflare_redesign
         and settings.cloudflare_account_id
@@ -140,6 +169,7 @@ async def generate_redesign(
         path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
         if path:
             path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.35)
+            path = _finalize_ai(path, 0.5)
             logger.info("REDESIGN ok engine=cloudflare path=%s", path)
             return path, "cloudflare", notes
         notes.append(f"cloudflare: {cf_err or 'request failed'}")
@@ -156,6 +186,7 @@ async def generate_redesign(
         path, err = await generate_hf_img2img_redesign(source_path, prompt, hq_mode=hq_mode)
         if path:
             path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.45)
+            path = _finalize_ai(path, 0.55)
             logger.info("REDESIGN ok engine=hf_img2img path=%s", path)
             return path, "hf_img2img", notes
         notes.append(f"hf_img2img: {err or 'failed'}")
@@ -167,15 +198,21 @@ async def generate_redesign(
         logger.info("REDESIGN try gemini_hq")
         path = await _gemini_hq(source_path, prompt)
         if path:
+            path = _finalize_ai(path, 0.7)
             logger.info("REDESIGN ok engine=gemini_hq path=%s", path)
             return path, "gemini_hq", notes
         notes.append("gemini_hq: no image in response")
         logger.warning("REDESIGN fail gemini_hq")
 
     if settings.allow_local_redesign_fallback:
-        path = _photoreal_photo_edit(source_path, prompt) or _local_fallback_redesign(source_path, prompt)
+        path = (
+            material_guide_rel
+            or _photoreal_photo_edit(source_path, prompt)
+            or _local_fallback_redesign(source_path, prompt)
+        )
+        engine = "region_materials" if path == material_guide_rel else "photo_edit"
         logger.warning("REDESIGN local_fallback path=%s notes=%s", path, notes)
-        return path, "photo_edit", notes
+        return path, engine, notes
 
     logger.error("REDESIGN unavailable notes=%s", notes)
     raise RedesignUnavailableError(notes)
@@ -222,63 +259,85 @@ def _blend_ai_file_onto_photo(source_path: Path, ai_rel: str, ai_weight: float =
 
 
 def _material_tint_from_prompt(prompt: str) -> tuple[int, int, int, float]:
-    """Return (r,g,b, strength) guessed from material wording."""
+    """Return (r,g,b, strength) guessed from material wording — strength high enough to see."""
     text = (prompt or "").lower()
-    # (rgb, strength) — strength = how hard to push wall midtones
     palette: list[tuple[tuple[str, ...], tuple[int, int, int], float]] = [
-        (("black granite", "charcoal", "anthracite", "matte black", "black metal"), (32, 32, 34), 0.55),
-        (("black",), (40, 40, 42), 0.5),
-        (("white marble", "carrara", "white stone"), (236, 232, 226), 0.5),
-        (("white", "ivory", "cream"), (242, 238, 230), 0.45),
-        (("grey", "gray", "concrete", "cement"), (150, 148, 144), 0.45),
-        (("brick", "terracotta", "clay"), (168, 84, 62), 0.5),
-        (("wood", "teak", "oak", "timber", "cedar"), (150, 110, 70), 0.4),
-        (("marble", "stone", "travertine"), (210, 205, 198), 0.4),
-        (("blue",), (110, 140, 170), 0.4),
-        (("green",), (90, 120, 95), 0.4),
-        (("beige", "sand", "stucco"), (210, 190, 160), 0.4),
-        (("metal", "steel", "aluminium", "aluminum", "zinc"), (170, 175, 180), 0.4),
+        (("black granite", "charcoal", "anthracite", "matte black", "black metal"), (28, 28, 30), 0.78),
+        (("black",), (36, 36, 38), 0.72),
+        (("white marble", "carrara", "white stone"), (245, 242, 236), 0.75),
+        (("white", "ivory", "cream"), (248, 244, 236), 0.7),
+        (("grey", "gray", "concrete", "cement"), (168, 166, 162), 0.68),
+        (("brick", "terracotta", "clay"), (178, 88, 64), 0.72),
+        (("wood", "teak", "oak", "timber", "cedar"), (158, 112, 68), 0.68),
+        (("marble", "stone", "travertine", "granite"), (218, 212, 204), 0.7),
+        (("blue",), (100, 132, 168), 0.68),
+        (("green",), (88, 128, 96), 0.68),
+        (("beige", "sand", "stucco", "render", "plaster"), (222, 200, 168), 0.7),
+        (("metal", "steel", "aluminium", "aluminum", "zinc", "cladding"), (176, 182, 188), 0.7),
+        (("paint", "acrylic", "emulsion"), (230, 226, 218), 0.65),
     ]
     for keys, rgb, strength in palette:
         if any(k in text for k in keys):
             return (*rgb, strength)
-    # Stable hash tint so Design A/B differ without looking random neon
     digest = hashlib.sha256(text.encode("utf-8")).digest()
-    return (140 + digest[0] % 80, 130 + digest[1] % 70, 120 + digest[2] % 60, 0.35)
+    # High-contrast but still believable facade color so Design A/B differ clearly
+    return (90 + digest[0] % 120, 90 + digest[1] % 100, 90 + digest[2] % 90, 0.65)
 
 
 def _photoreal_photo_edit(source_path: Path, prompt: str) -> str | None:
     """
-    Keep the exact real photograph; gently recolor facade midtones toward chosen materials.
-    Always looks like a real photo (never invents a new cartoon house).
+    Keep the exact real photograph; apply an OBVIOUS material recolor on the facade
+    so before/after is easy to spot (fallback when AI engines fail).
     """
     try:
         img = Image.open(source_path).convert("RGB")
+        w, h = img.size
         r, g, b, strength = _material_tint_from_prompt(prompt)
         overlay = Image.new("RGB", img.size, (r, g, b))
 
-        # Mask: mid-luminance = likely walls/siding; protect sky (bright) and shadows (dark)
         gray = ImageOps.grayscale(img)
-        mask = gray.point(
-            lambda p: int(255 * strength) if 45 < p < 210 else 0
+        # Stronger facade mask — midtones = walls; protect deep shadow + bright sky
+        mask = gray.point(lambda p: int(255 * min(0.95, strength + 0.1)) if 35 < p < 225 else 0)
+        # Prefer central building band (crop out some edge sky/ground)
+        band = Image.new("L", img.size, 0)
+        draw = ImageDraw.Draw(band)
+        draw.rectangle(
+            [int(w * 0.06), int(h * 0.08), int(w * 0.94), int(h * 0.92)],
+            fill=255,
         )
-        # Soften mask so it doesn't look pasted
-        mask = mask.filter(ImageFilter.GaussianBlur(radius=max(2, img.width // 200)))
+        band = band.filter(ImageFilter.GaussianBlur(max(4, w // 80)))
+        mask = ImageChops.multiply(mask, band)
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=max(3, w // 160)))
 
-        tinted = Image.composite(Image.blend(img, overlay, 0.55), img, mask)
-        # Roof often mentioned — slightly darken upper band if "roof"/"black" in prompt
+        # Heavy blend so renovation is unmistakable
+        recolored = Image.blend(img, overlay, 0.72)
+        tinted = Image.composite(recolored, img, mask)
+
+        # Cleaner, brighter renovated look
+        tinted = ImageEnhance.Brightness(tinted).enhance(1.08)
+        tinted = ImageEnhance.Contrast(tinted).enhance(1.12)
+        tinted = ImageEnhance.Color(tinted).enhance(1.1)
+        tinted = ImageEnhance.Sharpness(tinted).enhance(1.2)
+
+        # Roof darkening when asked
         if re.search(r"\broof\b", prompt or "", re.I) and re.search(
-            r"\b(black|charcoal|dark|metal|zinc)\b", prompt or "", re.I
+            r"\b(black|charcoal|dark|metal|zinc|tile)\b", prompt or "", re.I
         ):
-            roof = ImageEnhance.Brightness(tinted).enhance(0.82)
+            roof = ImageEnhance.Brightness(tinted).enhance(0.72)
+            roof = ImageEnhance.Color(roof).enhance(0.85)
             roof_mask = Image.new("L", img.size, 0)
-            draw = ImageDraw.Draw(roof_mask)
-            draw.rectangle([0, 0, img.width, int(img.height * 0.28)], fill=110)
-            roof_mask = roof_mask.filter(ImageFilter.GaussianBlur(12))
+            ImageDraw.Draw(roof_mask).rectangle([0, 0, w, int(h * 0.32)], fill=160)
+            roof_mask = roof_mask.filter(ImageFilter.GaussianBlur(14))
             tinted = Image.composite(roof, tinted, roof_mask)
 
-        tinted = ImageEnhance.Contrast(tinted).enhance(1.04)
-        tinted = ImageEnhance.Sharpness(tinted).enhance(1.12)
+        # Window/trim accent (lighter frames) so openings look refreshed
+        if re.search(r"\b(window|door|trim|frame)\b", prompt or "", re.I):
+            frames = ImageEnhance.Brightness(tinted).enhance(1.18)
+            frame_mask = gray.point(lambda p: 90 if 60 < p < 190 else 0)
+            frame_mask = frame_mask.filter(ImageFilter.FIND_EDGES)
+            frame_mask = frame_mask.point(lambda p: 140 if p > 20 else 0)
+            frame_mask = frame_mask.filter(ImageFilter.GaussianBlur(2))
+            tinted = Image.composite(frames, tinted, frame_mask)
 
         root = ensure_upload_dirs()
         name = f"{uuid.uuid4().hex}.jpg"

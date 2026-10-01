@@ -74,10 +74,10 @@ async def generate_replicate_img2img_redesign(
     except Exception as exc:
         return None, f"could not read image: {exc}"
 
-    # Keep structure tight so the house stays photoreal (not reinvented).
-    strength = float(settings.replicate_img2img_strength or 0.32)
+    # Keep structure but allow visible material change (too low = almost identical).
+    strength = float(settings.replicate_img2img_strength or 0.45)
     if hq_mode:
-        strength = min(0.45, strength + 0.06)
+        strength = min(0.55, strength + 0.06)
     steps = int(settings.replicate_img2img_steps or 28)
     if hq_mode:
         steps = min(40, steps + 6)

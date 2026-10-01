@@ -115,13 +115,20 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
 
 def build_redesign_prompt(material_summary: str) -> str:
     return (
-        "Ultra-realistic exterior photograph of THIS exact house — keep the identical "
-        "camera angle, roof shape, porch, window count, door position, landscaping, and sky. "
-        "This is an image-to-image edit of a real photo, not a new drawing. "
-        "Only replace cladding / paint / roof / trim finishes with: "
+        "EDIT this real exterior photo into a finished renovation — the material change must be "
+        "obvious at a glance when compared side-by-side with the original. "
+        "Keep the SAME building, camera angle, window positions, balcony, doors, tree, sky, and proportions. "
+        "Do NOT invent a new building or change the architecture. "
+        "CLEARLY REPLACE the old weathered walls / cladding / finishes with these new materials: "
         f"{material_summary}. "
-        "Show genuine building materials with real grain, mortar, metal seams, and soft natural daylight. "
-        "Photoreal DSLR look, 35mm, sharp focus, accurate perspective, natural colors. "
-        "Strictly avoid: cartoon, anime, illustration, painting, concept art, CGI, 3D render, "
-        "plastic skin, warped walls, melted windows, extra floors, different architecture."
+        "Make walls look freshly renovated: clean new cladding or paint, visible texture "
+        "(stone grain, brick mortar, metal panels, wood grain, or render as specified), "
+        "remove stains/dirt/decay on renovated surfaces, brighten the facade, "
+        "keep windows and openings in the same places but they may get matching new frames/trim. "
+        "Photoreal DSLR photograph, natural daylight, sharp real materials — not a painting or cartoon. "
+        "The before/after difference should be unmistakable: old tired surface → new premium finish."
     )
+
+
+def humanize_region_type(region_type: str) -> str:
+    return (region_type or "").replace("_", " ").strip() or "facade"

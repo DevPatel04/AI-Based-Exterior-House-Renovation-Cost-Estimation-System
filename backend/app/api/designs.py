@@ -8,7 +8,6 @@ from app.core.database import get_db
 from app.models import Design, DesignRegionMaterial, Material, ProjectImage, ProjectStatus, StructureRegion, User
 from app.schemas import DesignCreate, DesignOut, DesignRegionMaterialIn, VisualizeRequest
 from app.services.cloudflare import RedesignUnavailableError, generate_redesign
-from app.services.gemini import build_redesign_prompt
 from app.services.storage import absolute_path
 
 router = APIRouter(prefix="/api/projects/{project_id}/designs", tags=["designs"])
@@ -171,19 +170,51 @@ async def visualize(
             status_code=400,
             detail=f"Assign materials to “{design.name}” and save before generating a redesign",
         )
-    parts = []
+
+    from app.models import MaterialTexture
+    from app.services.gemini import humanize_region_type
+    from app.services.material_regions import (
+        RegionMaterialAssignment,
+        build_region_material_prompt,
+    )
+
+    assignments: list[RegionMaterialAssignment] = []
     for m in mappings:
         mat = db.get(Material, m.material_id)
         region = db.get(StructureRegion, m.region_id)
-        if mat and region:
-            parts.append(f"{mat.name} ({mat.material_type.value}) on {region.region_type.value}")
-    # Include design name so local/AI prompts differ across variants even with similar materials
-    prompt = build_redesign_prompt(
-        f"Design variant “{design.name}”: " + ("; ".join(parts) if parts else "subtle modern exterior refresh")
-    )
+        if not mat or not region:
+            continue
+        tex = (
+            db.query(MaterialTexture)
+            .filter(MaterialTexture.material_id == mat.id)
+            .order_by(MaterialTexture.id.desc())
+            .first()
+        )
+        assignments.append(
+            RegionMaterialAssignment(
+                region_type=region.region_type.value,
+                region_label=region.label or humanize_region_type(region.region_type.value),
+                points=list(region.points or []),
+                material_id=mat.id,
+                material_name=mat.name,
+                material_type=mat.material_type.value,
+                description=mat.description,
+                texture_path=tex.file_path if tex else None,
+            )
+        )
+    if not assignments:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not resolve region/material assignments — re-select materials and save",
+        )
+
+    prompt = build_region_material_prompt(assignments, design_name=design.name)
     try:
         rel, engine, notes = await generate_redesign(
-            absolute_path(image.file_path), prompt, hq_mode=payload.hq_mode
+            absolute_path(image.file_path),
+            prompt,
+            hq_mode=payload.hq_mode,
+            assignments=assignments,
         )
     except RedesignUnavailableError as exc:
         raise HTTPException(
@@ -196,7 +227,11 @@ async def visualize(
             ),
         ) from exc
     design.redesign_path = rel
-    note_suffix = f" :: {' | '.join(notes)}" if notes and engine in {"local_fallback", "photo_edit"} else ""
+    note_suffix = (
+        f" :: {' | '.join(notes)}"
+        if notes and engine in {"local_fallback", "photo_edit", "region_materials"}
+        else ""
+    )
     design.prompt_used = f"[{engine}] {prompt}{note_suffix}"
     design.hq_mode = payload.hq_mode
     design.is_active = True

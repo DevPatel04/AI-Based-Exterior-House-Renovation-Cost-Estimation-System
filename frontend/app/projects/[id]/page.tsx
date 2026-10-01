@@ -939,7 +939,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a photoreal redesign with google/nano-banana-2 from your photo (materials on “${activeDesign.name}”).`
+              ? `Generate a redesign that applies each material you selected onto its region (Nano Banana 2 + region material map).`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
@@ -976,6 +976,9 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[region_materials]") && (
+                  <Badge tone="brand">Region materials</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[nano_banana]") && (
                   <Badge tone="brand">Nano Banana 2</Badge>
                 )}
