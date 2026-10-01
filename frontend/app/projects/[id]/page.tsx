@@ -306,7 +306,7 @@ export default function ProjectWorkspacePage() {
       setRedesignVersion((v) => v + 1);
       toast.success(hq ? "HQ redesign generated." : "Redesign generated.");
     } catch (err: any) {
-      toast.error(err.message);
+      toast.error(err.message || "Redesign failed");
     } finally {
       setBusy(false);
       setProgress("");
@@ -873,7 +873,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view using materials in “${activeDesign.name}”. With FAL_KEY, ControlNet preserves facade structure; otherwise Cloudflare or a local preview is used.`
+              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Uses Replicate ControlNet when REPLICATE_API_TOKEN is set; otherwise fal / Cloudflare. A green “Local preview” means AI keys failed.`
               : "Generate a redesigned view of your house using your selected materials."
           }
           actions={
@@ -905,14 +905,20 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[replicate_controlnet]") && (
+                  <Badge tone="brand">Replicate ControlNet</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[fal_controlnet]") && (
-                  <Badge tone="brand">ControlNet</Badge>
+                  <Badge tone="brand">fal ControlNet</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("[gemini_hq]") && (
+                  <Badge tone="violet">Gemini HQ</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[cloudflare]") && (
                   <Badge tone="neutral">Cloudflare</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[local_fallback]") && (
-                  <Badge tone="warning">Local preview</Badge>
+                  <Badge tone="warning">Local preview (not AI)</Badge>
                 )}
               </figcaption>
               {activeDesign?.redesign_path ? (

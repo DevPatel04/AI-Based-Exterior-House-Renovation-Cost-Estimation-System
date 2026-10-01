@@ -7,7 +7,7 @@ from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
 from app.models import Design, DesignRegionMaterial, Material, ProjectImage, ProjectStatus, StructureRegion, User
 from app.schemas import DesignCreate, DesignOut, DesignRegionMaterialIn, VisualizeRequest
-from app.services.cloudflare import generate_redesign
+from app.services.cloudflare import RedesignUnavailableError, generate_redesign
 from app.services.gemini import build_redesign_prompt
 from app.services.storage import absolute_path
 
@@ -181,9 +181,23 @@ async def visualize(
     prompt = build_redesign_prompt(
         f"Design variant “{design.name}”: " + ("; ".join(parts) if parts else "subtle modern exterior refresh")
     )
-    rel, engine = await generate_redesign(absolute_path(image.file_path), prompt, hq_mode=payload.hq_mode)
+    try:
+        rel, engine, notes = await generate_redesign(
+            absolute_path(image.file_path), prompt, hq_mode=payload.hq_mode
+        )
+    except RedesignUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AI redesign unavailable — not using the green local preview. "
+                + " | ".join(exc.notes)
+                + " Fix REPLICATE_API_TOKEN (https://replicate.com/account/api-tokens), "
+                "or set FAL_KEY / Cloudflare keys, or ALLOW_LOCAL_REDESIGN_FALLBACK=true for demo mode."
+            ),
+        ) from exc
     design.redesign_path = rel
-    design.prompt_used = f"[{engine}] {prompt}"
+    note_suffix = f" :: {' | '.join(notes)}" if notes and engine == "local_fallback" else ""
+    design.prompt_used = f"[{engine}] {prompt}{note_suffix}"
     design.hq_mode = payload.hq_mode
     design.is_active = True
     db.query(Design).filter(Design.project_id == project.id, Design.id != design.id).update({"is_active": False})

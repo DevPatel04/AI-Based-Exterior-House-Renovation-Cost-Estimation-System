@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     replicate_controlnet_scale: float = 0.65
     replicate_controlnet_steps: int = 28
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
+    # Green-overlay PIL preview when all AI engines fail (off by default — prefer a clear error)
+    allow_local_redesign_fallback: bool = False
 
     # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
     hf_token: str = ""

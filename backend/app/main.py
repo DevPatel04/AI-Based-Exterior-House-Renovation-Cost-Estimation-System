@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,23 @@ from app.core.database import SessionLocal
 from app.services.storage import ensure_upload_dirs
 
 settings = get_settings()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    force=True,
+)
+for _name in (
+    "app.api.regions",
+    "app.api.designs",
+    "app.services.gemini",
+    "app.services.segformer",
+    "app.services.grounded_detect",
+    "app.services.cloudflare",
+    "app.services.replicate_controlnet",
+):
+    logging.getLogger(_name).setLevel(logging.INFO)
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
