@@ -833,7 +833,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view of your house using the materials in “${activeDesign.name}”.`
+              ? `Generate a redesigned view using materials in “${activeDesign.name}”. With FAL_KEY, ControlNet preserves facade structure; otherwise Cloudflare or a local preview is used.`
               : "Generate a redesigned view of your house using your selected materials."
           }
           actions={
@@ -865,6 +865,15 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[fal_controlnet]") && (
+                  <Badge tone="brand">ControlNet</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("[cloudflare]") && (
+                  <Badge tone="neutral">Cloudflare</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("[local_fallback]") && (
+                  <Badge tone="warning">Local preview</Badge>
+                )}
               </figcaption>
               {activeDesign?.redesign_path ? (
                 <AuthImage

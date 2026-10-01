@@ -58,6 +58,9 @@ git push origin develop
 | `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
 | `CLOUDFLARE_API_TOKEN`  | optional                                                       |
 | `ENABLE_GEMINI_HQ`      | `false`                                                        |
+| `FAL_KEY`               | optional — [fal.ai](https://fal.ai) API key for ControlNet redesign (no local GPU) |
+| `ENABLE_FAL_CONTROLNET` | `true` (used when `FAL_KEY` is set)                            |
+| `FAL_CONTROLNET_MODEL`  | default `fal-ai/fast-sdxl-controlnet-canny`                    |
 
 
 1. **Volume (important):** local uploads are wiped without a volume

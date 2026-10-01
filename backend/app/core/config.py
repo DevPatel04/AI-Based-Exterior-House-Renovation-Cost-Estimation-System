@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     cloudflare_api_token: str = ""
     cloudflare_image_model: str = "@cf/bytedance/stable-diffusion-xl-lightning"
 
+    # Optional fal.ai ControlNet (cloud GPU — no local GPU required)
+    fal_key: str = ""
+    enable_fal_controlnet: bool = True
+    fal_controlnet_model: str = "fal-ai/fast-sdxl-controlnet-canny"
+    fal_controlnet_scale: float = 0.65
+    fal_controlnet_steps: int = 28
+
     default_door_width_ft: float = 3.0
     default_door_height_ft: float = 7.0
     default_window_width_ft: float = 4.0
