@@ -1,12 +1,9 @@
-"""SegFormer facade structure detection (Hugging Face Inference Providers).
-
-Legacy api-inference.huggingface.co is retired. We call router.huggingface.co only.
+"""SegFormer facade structure detection (Hugging Face Inference).
 
 ADE SegFormer often labels the whole house as one "building" mask.
 We therefore:
-  1) Run ADE (+ Cityscapes) SegFormer and merge labels
-  2) Punch opening masks out of the wall so windows stay separate
-  3) Caller may enrich with Replicate Grounded-SAM / DINO when openings are thin
+  1) Run ADE + CMP models and merge labels
+  2) Enrich walls-only results with OpenCV window/door/roof candidates
 """
 
 from __future__ import annotations
@@ -192,29 +189,21 @@ def _mask_to_regions(
         RegionType.gate.value,
         RegionType.railing.value,
         RegionType.pillar.value,
-        RegionType.balcony.value,
     }
     binary = _clean_mask(mask, soft=soft)
-    # TREE finds separate window panes inside larger facade blobs
-    mode = cv2.RETR_TREE if soft else cv2.RETR_EXTERNAL
-    contours, _ = cv2.findContours(binary, mode, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
 
     if min_area_frac is None:
         if region_type == RegionType.main_wall.value:
-            min_area_frac = 0.02
+            min_area_frac = 0.015
         elif region_type == RegionType.window.value:
-            min_area_frac = 0.00035
-        elif region_type in {
-            RegionType.gate.value,
-            RegionType.pillar.value,
-            RegionType.railing.value,
-            RegionType.balcony.value,
-        }:
             min_area_frac = 0.0008
+        elif region_type in {RegionType.gate.value, RegionType.pillar.value, RegionType.railing.value}:
+            min_area_frac = 0.0015
         else:
-            min_area_frac = 0.002
+            min_area_frac = 0.003
 
     min_area = h * w * min_area_frac
     scored = []
@@ -222,25 +211,14 @@ def _mask_to_regions(
         area = float(cv2.contourArea(c))
         if area < min_area:
             continue
-        if region_type != RegionType.main_wall.value and area > h * w * 0.45:
-            continue
         scored.append((area, c))
     scored.sort(key=lambda t: t[0], reverse=True)
 
     out: list[dict] = []
     for i, (_area, contour) in enumerate(scored[:max_parts]):
-        if region_type in {
-            RegionType.window.value,
-            RegionType.gate.value,
-            RegionType.balcony.value,
-            RegionType.pillar.value,
-        }:
+        # Prefer axis-aligned boxes for windows/doors (more editable in Konva)
+        if region_type in {RegionType.window.value, RegionType.gate.value}:
             x, y, bw, bh = cv2.boundingRect(contour)
-            if bw < 8 or bh < 8:
-                continue
-            aspect = bw / max(1, bh)
-            if region_type == RegionType.window.value and not (0.25 <= aspect <= 4.5):
-                continue
             points = _bbox_points(x, y, x + bw, y + bh, w, h)
         else:
             points = _contour_to_points(contour, w, h)
@@ -298,8 +276,7 @@ def _poly_area(points: list[dict]) -> float:
 
 
 def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
-    """Parse HF masks; punch openings out of wall so the wall doesn't swallow windows."""
-    by_type: dict[str, list[tuple[np.ndarray, float, str]]] = {}
+    regions: list[dict] = []
     items = payload if isinstance(payload, list) else [payload]
     for item in items:
         if not isinstance(item, dict):
@@ -308,32 +285,13 @@ def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
         rtype = _map_label(label)
         if not rtype:
             continue
-        score = float(item.get("score") if item.get("score") is not None else 0.75)
+        score = item.get("score")
+        if score is None:
+            score = 0.75
         mask = _decode_mask(item.get("mask"), height, width)
         if mask is None:
             continue
-        by_type.setdefault(rtype, []).append((mask, score, label))
-
-    opening_types = {
-        RegionType.window.value,
-        RegionType.gate.value,
-        RegionType.balcony.value,
-        RegionType.railing.value,
-        RegionType.pillar.value,
-    }
-    openings = np.zeros((height, width), dtype=np.uint8)
-    for rtype in opening_types:
-        for mask, _score, _label in by_type.get(rtype, []):
-            openings = np.maximum(openings, (mask > 127).astype(np.uint8) * 255)
-
-    regions: list[dict] = []
-    for rtype, entries in by_type.items():
-        for mask, score, label in entries:
-            work = mask
-            if rtype == RegionType.main_wall.value and openings.any():
-                work = mask.copy()
-                work[openings > 0] = 0
-            regions.extend(_mask_to_regions(work, rtype, _pretty_label(rtype, label), score))
+        regions.extend(_mask_to_regions(mask, rtype, _pretty_label(rtype, label), float(score)))
 
     walls = [r for r in regions if r["region_type"] == RegionType.main_wall.value]
     others = [r for r in regions if r["region_type"] != RegionType.main_wall.value]
@@ -378,25 +336,9 @@ def _merge_region_lists(*lists: list[dict]) -> list[dict]:
     walls = walls[:2]
 
     kept: list[dict] = []
-    # Prefer model masks over OpenCV heuristics when overlapping
-    source_rank = {
-        "gemini_refine": 5,
-        "gemini_vision": 4,
-        "replicate_grounded_sam": 4,
-        "replicate_grounding_dino": 3,
-        "segformer": 2,
-        "grounded_sam": 2,
-    }
-
-    def _rank(r: dict) -> tuple:
-        return (
-            source_rank.get(str(r.get("source") or ""), 1),
-            float(r.get("confidence") or 0.5),
-        )
-
-    for r in sorted(parts, key=_rank, reverse=True):
+    for r in sorted(parts, key=lambda x: float(x.get("confidence") or 0.5), reverse=True):
         if any(
-            k["region_type"] == r["region_type"] and _iou_norm(k["points"], r["points"]) > 0.4
+            k["region_type"] == r["region_type"] and _iou_norm(k["points"], r["points"]) > 0.55
             for k in kept
         ):
             continue
@@ -414,129 +356,212 @@ def _merge_region_lists(*lists: list[dict]) -> list[dict]:
     return walls + kept
 
 
-def _format_network_error(exc: Exception, service: str) -> str:
-    msg = str(exc)
-    low = msg.lower()
-    if "name or service not known" in low or "no address associated" in low or "temporary failure in name resolution" in low or "errno -5" in low or "errno -3" in low:
-        return (
-            f"Cannot reach {service} (DNS/network). "
-            "Railway backend must have outbound HTTPS. Redeploy the service, "
-            "confirm HF_TOKEN / REPLICATE_API_TOKEN are set on this backend service, "
-            "or draw regions manually."
+def _wall_bbox_px(regions: list[dict], w: int, h: int) -> tuple[int, int, int, int]:
+    walls = [r for r in regions if r["region_type"] == RegionType.main_wall.value]
+    if not walls:
+        return int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)
+    pts = walls[0]["points"]
+    xs = [p["x"] for p in pts]
+    ys = [p["y"] for p in pts]
+    return (
+        int(min(xs) * w),
+        int(min(ys) * h),
+        int(max(xs) * w),
+        int(max(ys) * h),
+    )
+
+
+def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list[dict]:
+    """
+    When SegFormer only returns walls, find rectangular openings (windows/doors)
+    and a roof band inside the facade bbox using classical CV.
+    """
+    windows = sum(1 for r in regions if r["region_type"] == RegionType.window.value)
+    doors = sum(1 for r in regions if r["region_type"] == RegionType.gate.value)
+    # Always enrich when windows/doors are missing (ADE often returns wall-only)
+    if windows >= 2 and doors >= 1:
+        return regions
+
+    h, w = image_rgb.shape[:2]
+    x0, y0, x1, y1 = _wall_bbox_px(regions, w, h)
+    # Inset slightly so we stay on the facade surface
+    pad_x = int((x1 - x0) * 0.04)
+    pad_y = int((y1 - y0) * 0.06)
+    x0, y0 = max(0, x0 + pad_x), max(0, y0 + pad_y)
+    x1, y1 = min(w - 1, x1 - pad_x), min(h - 1, y1 - pad_y)
+    if x1 - x0 < 40 or y1 - y0 < 40:
+        return regions
+
+    crop = image_rgb[y0:y1, x0:x1]
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 40, 120)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+
+    # TREE so inner window frames are kept (EXTERNAL often misses them)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    facade_area = float(max(1, (x1 - x0) * (y1 - y0)))
+    candidates: list[tuple[float, dict]] = []
+
+    for c in contours:
+        area = float(cv2.contourArea(c))
+        if area < facade_area * 0.002 or area > facade_area * 0.28:
+            continue
+        rx, ry, rw, rh = cv2.boundingRect(c)
+        if rw < 16 or rh < 16:
+            continue
+        aspect = rw / max(1, rh)
+        rectangularity = area / max(1.0, float(rw * rh))
+        if rectangularity < 0.32 or not (0.35 <= aspect <= 3.2):
+            continue
+
+        abs_x0, abs_y0 = x0 + rx, y0 + ry
+        abs_x1, abs_y1 = abs_x0 + rw, abs_y0 + rh
+        # Reject boxes glued to the outer frame
+        if abs_x0 <= x0 + 2 or abs_y0 <= y0 + 2 or abs_x1 >= x1 - 2 or abs_y1 >= y1 - 2:
+            if area > facade_area * 0.12:
+                continue
+
+        cy = ((abs_y0 + abs_y1) / 2) / h
+        points = _bbox_points(abs_x0, abs_y0, abs_x1, abs_y1, w, h)
+
+        if aspect < 0.6 and rh > rw * 1.35 and cy > 0.48:
+            rtype = RegionType.gate.value
+            label = "Door / gate"
+        else:
+            rtype = RegionType.window.value
+            label = "Window"
+
+        score = rectangularity * min(1.0, area / (facade_area * 0.02))
+        candidates.append(
+            (
+                score,
+                {
+                    "region_type": rtype,
+                    "label": label,
+                    "points": points,
+                    "confidence": 0.55,
+                    "source": "opencv_enrich",
+                },
+            )
         )
-    if "timed out" in low or "timeout" in low:
-        return f"{service} timed out. Try again in a minute or draw regions manually."
-    return f"{service} error: {msg[:180]}"
+
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    added: list[dict] = []
+    for _score, reg in candidates:
+        rtype = reg["region_type"]
+        if rtype == RegionType.window.value and sum(1 for a in added if a["region_type"] == RegionType.window.value) >= 6:
+            continue
+        if rtype == RegionType.gate.value and any(a["region_type"] == RegionType.gate.value for a in added):
+            continue
+        if any(_iou_norm(a["points"], reg["points"]) > 0.4 for a in added):
+            continue
+        if any(
+            r["region_type"] != RegionType.main_wall.value and _iou_norm(r["points"], reg["points"]) > 0.4
+            for r in regions
+        ):
+            continue
+        added.append(reg)
+
+    if not any(r["region_type"] == RegionType.roof_edge.value for r in regions + added):
+        band_h = max(8, int((y1 - y0) * 0.08))
+        added.append(
+            {
+                "region_type": RegionType.roof_edge.value,
+                "label": "Roof edge",
+                "points": _bbox_points(x0, max(0, y0 - band_h // 2), x1, y0 + band_h, w, h),
+                "confidence": 0.5,
+                "source": "opencv_enrich",
+            }
+        )
+
+    wins = [a for a in added if a["region_type"] == RegionType.window.value]
+    for i, a in enumerate(wins, start=1):
+        a["label"] = f"Window {i}" if len(wins) > 1 else "Window"
+
+    if added:
+        logger.info("OpenCV enrich added %s parts (windows/doors/roof)", len(added))
+    return _merge_region_lists(regions, added)
+
+
+def detect_opencv_fallback(image_path: Path) -> list[dict]:
+    """
+    Last-resort detector when HF/Replicate are unavailable.
+    Places a facade wall box on the central image band, then finds windows/doors.
+    """
+    try:
+        pil = Image.open(image_path).convert("RGB")
+        pil.thumbnail((1024, 1024))
+        rgb = np.array(pil)
+    except Exception as exc:
+        raise StructureDetectError(f"Could not read project image: {exc}") from exc
+
+    h, w = rgb.shape[:2]
+    # Estimate facade as the densest edge band in the middle of the frame
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    # Ignore outer 5% (often sky/ground margins)
+    ys, xs = np.where(edges > 0)
+    if len(xs) > 50:
+        x0 = int(np.percentile(xs, 8))
+        x1 = int(np.percentile(xs, 92))
+        y0 = int(np.percentile(ys, 10))
+        y1 = int(np.percentile(ys, 90))
+    else:
+        x0, y0, x1, y1 = int(w * 0.12), int(h * 0.15), int(w * 0.88), int(h * 0.88)
+
+    wall = {
+        "region_type": RegionType.main_wall.value,
+        "label": "Main wall",
+        "points": _bbox_points(x0, y0, x1, y1, w, h),
+        "confidence": 0.45,
+        "source": "opencv_fallback",
+    }
+    regions = enrich_with_opencv_parts(rgb, [wall])
+    if not regions:
+        regions = [wall]
+    for r in regions:
+        r["source"] = r.get("source") or "opencv_fallback"
+    logger.warning("Using OpenCV fallback structure detection (%s regions)", len(regions))
+    return regions
 
 
 def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, token: str) -> list | dict | None:
-    """Call Hugging Face Inference Providers (router). Legacy api-inference is retired."""
-    headers_raw = {
+    headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "image/jpeg",
         "Accept": "application/json",
         "X-Wait-For-Model": "true",
     }
-    # Legacy api-inference.huggingface.co is gone (DNS/410). Router only.
-    base = f"https://router.huggingface.co/hf-inference/models/{model}"
-    payloads: list[tuple[str, dict, bytes | dict]] = [
-        ("bytes", headers_raw, body),
-        (
-            "json_b64",
-            {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "X-Wait-For-Model": "true",
-            },
-            {
-                "inputs": base64.b64encode(body).decode("ascii"),
-                "parameters": {"threshold": 0.3},
-            },
-        ),
+    urls = [
+        f"https://router.huggingface.co/hf-inference/models/{model}",
+        f"https://api-inference.huggingface.co/models/{model}",
+        f"https://api-inference.huggingface.co/pipeline/image-segmentation/{model}",
     ]
     last_err = None
-    t0 = time.perf_counter()
-    logger.info("DETECT hf_call start model=%s bytes=%s", model, len(body))
-    for attempt in range(3):
-        for kind, headers, payload in payloads:
-            try:
-                if kind == "bytes":
-                    resp = client.post(base, headers=headers, content=payload)  # type: ignore[arg-type]
-                else:
-                    resp = client.post(base, headers=headers, json=payload)
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
-                last_err = _format_network_error(exc, "Hugging Face")
-                logger.warning(
-                    "DETECT hf_call connect_fail model=%s kind=%s attempt=%s err=%s",
-                    model,
-                    kind,
-                    attempt + 1,
-                    exc,
-                )
-                continue
+    for url in urls:
+        for attempt in range(3):
+            resp = client.post(url, headers=headers, content=body)
             if resp.status_code == 503:
-                logger.info(
-                    "DETECT hf_call model_loading model=%s attempt=%s status=503",
-                    model,
-                    attempt + 1,
-                )
                 time.sleep(5 + attempt * 5)
-                break  # retry outer attempt
-            if resp.status_code == 410:
-                last_err = f"410 deprecated: {resp.text[:180]}"
-                logger.warning(
-                    "DETECT hf_call deprecated model=%s body=%s",
-                    model,
-                    resp.text[:180],
-                )
-                # Model removed from hf-inference catalog — do not retry other payloads
-                return None
+                continue
             if resp.status_code >= 400:
                 last_err = f"{resp.status_code}: {resp.text[:200]}"
-                logger.warning(
-                    "DETECT hf_call http_error model=%s kind=%s status=%s body=%s",
-                    model,
-                    kind,
-                    resp.status_code,
-                    resp.text[:200],
-                )
-                continue
+                break
             try:
                 data = resp.json()
             except Exception as exc:
                 last_err = str(exc)
-                continue
+                break
             if isinstance(data, dict) and data.get("error"):
                 last_err = str(data.get("error"))
-                low = last_err.lower()
-                if "loading" in low:
-                    logger.info("DETECT hf_call still_loading model=%s err=%s", model, last_err)
+                if "loading" in last_err.lower():
                     time.sleep(8)
-                    break
-                if "deprecated" in low or "no longer supported" in low:
-                    logger.warning("DETECT hf_call deprecated model=%s err=%s", model, last_err)
-                    return None
-                continue
-            ms = int((time.perf_counter() - t0) * 1000)
-            logger.info(
-                "DETECT hf_call ok model=%s kind=%s ms=%s segments=%s",
-                model,
-                kind,
-                ms,
-                len(data) if isinstance(data, list) else "dict",
-            )
+                    continue
+                break
             return data
-        else:
-            continue
-        # only reached when inner break (503/loading retry)
-        continue
-
-    ms = int((time.perf_counter() - t0) * 1000)
     if last_err:
-        logger.warning("DETECT hf_call fail model=%s ms=%s err=%s", model, ms, last_err)
-        if "Cannot reach Hugging Face" in last_err or "timed out" in last_err.lower():
-            raise StructureDetectError(last_err)
+        logger.warning("HF SegFormer failed for %s: %s", model, last_err)
     return None
 
 
@@ -555,6 +580,7 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         pil = Image.open(image_path).convert("RGB")
         pil.thumbnail((1024, 1024))
         width, height = pil.size
+        rgb = np.array(pil)
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=92)
         body = buf.getvalue()
@@ -562,61 +588,40 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         raise StructureDetectError(f"Could not read project image: {exc}") from exc
 
     primary = (settings.segformer_model or "nvidia/segformer-b0-finetuned-ade-512-512").strip()
-    # CMP facade model was removed from HF Inference Providers (410 Gone).
-    # ADE = building/windowpane/door; Cityscapes = building/wall (extra facade mass).
+    # CMP first for windows/doors/balcony; ADE for solid facade wall
     models: list[str] = []
     for m in (
+        "Xpitfire/segformer-finetuned-segments-cmp-facade",
         primary,
         "nvidia/segformer-b0-finetuned-ade-512-512",
-        "nvidia/segformer-b0-finetuned-cityscapes-1024-1024",
     ):
         if m and m not in models:
             models.append(m)
 
-    from app.services.detect_log import format_summary
-
     collected: list[list[dict]] = []
-    network_err: str | None = None
-    logger.info(
-        "DETECT segformer begin image=%s size=%sx%s models=%s",
-        image_path.name,
-        width,
-        height,
-        models,
-    )
     with httpx.Client(timeout=180.0) as client:
         for model in models:
-            try:
-                data = _call_hf_image_segmentation(client, model, body, token)
-            except StructureDetectError as exc:
-                network_err = str(exc)
-                logger.error("DETECT segformer model_abort model=%s err=%s", model, exc)
-                continue
+            data = _call_hf_image_segmentation(client, model, body, token)
             if data is None:
-                logger.warning("DETECT segformer model_empty model=%s", model)
                 continue
             regions = _parse_hf_segmentation(data, width, height)
             if regions:
                 logger.info(
-                    "DETECT segformer model_ok model=%s %s",
+                    "SegFormer (%s) → %s regions (%s non-wall)",
                     model,
-                    format_summary(regions),
+                    len(regions),
+                    sum(1 for r in regions if r["region_type"] != RegionType.main_wall.value),
                 )
                 collected.append(regions)
-            else:
-                logger.warning("DETECT segformer parse_empty model=%s", model)
 
     if not collected:
-        if network_err:
-            raise StructureDetectError(network_err)
         raise StructureDetectError(
-            "SegFormer returned no facade regions (HF Inference Providers). "
-            "Pipeline will try Replicate if REPLICATE_API_TOKEN is set. "
-            "Or draw regions manually."
+            "SegFormer returned no facade regions for this photo. "
+            "Try a clearer front-facing exterior, or draw regions manually."
         )
 
     merged = _merge_region_lists(*collected)
-    logger.info("DETECT segformer merged %s", format_summary(merged))
+    merged = enrich_with_opencv_parts(rgb, merged)
     return merged
 
 

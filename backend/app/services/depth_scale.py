@@ -79,6 +79,7 @@ def _hf_depth_sync(image_path: Path) -> np.ndarray | None:
     }
     urls = [
         f"https://router.huggingface.co/hf-inference/models/{model}",
+        f"https://api-inference.huggingface.co/models/{model}",
     ]
     try:
         with httpx.Client(timeout=120.0) as client:

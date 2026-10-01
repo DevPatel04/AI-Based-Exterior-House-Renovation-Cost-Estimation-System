@@ -78,7 +78,7 @@ async def generate_replicate_controlnet_redesign(source_path: Path, prompt: str)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=60",
+        "Prefer": "wait=90",
     }
 
     try:

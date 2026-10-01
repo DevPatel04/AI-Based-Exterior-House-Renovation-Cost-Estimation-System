@@ -5,10 +5,7 @@ from pathlib import Path
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
-from app.models import RegionType
 from app.services.segformer import StructureDetectError
-
-_REGION_TYPES = {e.value for e in RegionType}
 
 
 def _extract_json(text: str) -> list | dict:
@@ -22,49 +19,9 @@ def _extract_json(text: str) -> list | dict:
         raise
 
 
-def _parse_gemini_regions(data: list | dict, source: str) -> list[dict]:
-    if not isinstance(data, list):
-        return []
-    cleaned: list[dict] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        rtype = item.get("region_type")
-        if rtype not in _REGION_TYPES:
-            continue
-        points = item.get("points") or []
-        if len(points) < 3:
-            continue
-        norm_pts = []
-        ok = True
-        for p in points[:12]:
-            try:
-                x = float(p["x"])
-                y = float(p["y"])
-            except Exception:
-                ok = False
-                break
-            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-                ok = False
-                break
-            norm_pts.append({"x": round(x, 4), "y": round(y, 4)})
-        if not ok or len(norm_pts) < 3:
-            continue
-        cleaned.append(
-            {
-                "region_type": rtype,
-                "label": item.get("label") or rtype.replace("_", " ").title(),
-                "points": norm_pts,
-                "confidence": float(item.get("confidence") or 0.7),
-                "source": source,
-            }
-        )
-    return cleaned
-
-
 def _gemini_quality_notes_sync(image_path: Path) -> str | None:
     settings = get_settings()
-    if not settings.gemini_api_key or not settings.enable_gemini_quality_notes:
+    if not settings.gemini_api_key:
         return None
     try:
         import google.generativeai as genai
@@ -87,226 +44,73 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
     return await run_in_threadpool(_gemini_quality_notes_sync, image_path)
 
 
-def _detect_structure_regions_gemini_sync(image_path: Path) -> list[dict]:
-    """Full structure detect from the photo via Gemini vision (no template boxes)."""
-    settings = get_settings()
-    if not (settings.gemini_api_key or "").strip() or not settings.enable_gemini_region_detect:
-        return []
-
-    prompt = f"""
-Analyze this residential house exterior photo.
-Return ONLY a valid JSON array of structure regions. Each item:
-{{
-  "region_type": one of {sorted(_REGION_TYPES)},
-  "label": short string,
-  "points": [{{"x":0-1,"y":0-1}}, ...] normalized polygon (3-8 points),
-  "confidence": 0-1
-}}
-Include every visible main wall, window, door/gate, balcony, pillar, parapet, railing, and roof edge.
-Do not include sky, trees, ground, or vehicles.
-Separate each window; do not merge windows into one polygon.
-"""
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(settings.gemini_model)
-        uploaded = genai.upload_file(str(image_path))
-        result = model.generate_content([uploaded, prompt])
-        data = _extract_json(result.text or "[]")
-        return _parse_gemini_regions(data, "gemini_vision")
-    except Exception:
-        return []
-
-
-def _refine_regions_gemini_sync(image_path: Path, regions: list[dict]) -> list[dict]:
-    """Adjust model draft regions using Gemini vision."""
-    settings = get_settings()
-    if (
-        not (settings.gemini_api_key or "").strip()
-        or not settings.enable_gemini_region_refine
-        or not regions
-    ):
-        return regions
-
-    seed = [
-        {
-            "region_type": r.get("region_type"),
-            "label": r.get("label"),
-            "points": r.get("points"),
-            "confidence": r.get("confidence"),
-        }
-        for r in regions
-    ]
-    prompt = f"""
-You are refining exterior house structure regions for renovation estimating.
-Current draft regions (normalized 0-1 image coords) JSON:
-{json.dumps(seed)[:6000]}
-
-Return ONLY a JSON array of improved regions. Each item:
-{{
-  "region_type": one of {sorted(_REGION_TYPES)},
-  "label": short string,
-  "points": [{{"x":0-1,"y":0-1}}, ...] polygon with 4-8 points tightly around the part,
-  "confidence": 0-1
-}}
-
-Rules:
-- Fit polygons to visible walls, windows, doors/gates, balconies, pillars, railings, parapet, roof edges.
-- Include every clearly visible opening; remove only obvious false boxes on sky, trees, ground, or cars.
-- Separate each window.
-"""
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(settings.gemini_model)
-        uploaded = genai.upload_file(str(image_path))
-        result = model.generate_content([uploaded, prompt])
-        data = _extract_json(result.text or "[]")
-        cleaned = _parse_gemini_regions(data, "gemini_refine")
-        if not cleaned:
-            return regions
-        draft_parts = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-        refined_parts = sum(1 for c in cleaned if c["region_type"] != RegionType.main_wall.value)
-        has_wall = any(c["region_type"] == RegionType.main_wall.value for c in cleaned)
-        if has_wall and refined_parts >= max(1, draft_parts):
-            return cleaned
-        if refined_parts > draft_parts and refined_parts >= 2:
-            return cleaned
-        return regions
-    except Exception:
-        return regions
-
-
 async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
-    Model-only structure detection (no hardcoded region templates).
+    Structure detection (no hardcoded default boxes).
 
-      1) SegFormer masks via Hugging Face (best when HF DNS works)
-      2) Replicate Grounded-SAM per-class + Grounding-DINO (same accuracy goal when HF fails)
-      3) Gemini vision only if ENABLE_GEMINI_REGION_DETECT=true
-      4) Gemini refine only if ENABLE_GEMINI_REGION_REFINE=true
+    Order:
+      1) SegFormer ADE + CMP (merged) + OpenCV window/door enrich
+      2) If still walls-only and Replicate token set → Grounded-SAM merge
+      3) OpenCV-only fallback (so detect never hard-fails without tokens)
     """
     import logging
 
-    from app.services.detect_log import format_summary, timed_step
-    from app.services.segformer import _merge_region_lists, detect_segformer_regions
+    from app.models import RegionType
+    from app.services.segformer import detect_opencv_fallback, detect_segformer_regions
 
     logger = logging.getLogger(__name__)
-    settings = get_settings()
+    last_err: Exception | None = None
     regions: list[dict] = []
-    errors: list[str] = []
-    pipeline: list[str] = []
-
-    logger.info(
-        "DETECT pipeline begin image=%s hf=%s replicate=%s gemini_detect=%s gemini_refine=%s",
-        image_path.name,
-        bool((settings.hf_token or "").strip() and settings.enable_segformer),
-        bool((settings.replicate_api_token or "").strip()),
-        bool(settings.enable_gemini_region_detect and (settings.gemini_api_key or "").strip()),
-        bool(settings.enable_gemini_region_refine and (settings.gemini_api_key or "").strip()),
-    )
-
-    if (settings.hf_token or "").strip() and settings.enable_segformer:
-        with timed_step(logger, "hf_segformer", image=image_path.name) as step:
-            try:
-                regions = await detect_segformer_regions(image_path)
-                step["summary"] = format_summary(regions)
-                pipeline.append("hf_segformer")
-            except StructureDetectError as exc:
-                errors.append(str(exc))
-                step["summary"] = f"failed: {exc}"
-                logger.error("HF SegFormer detect failed: %s", exc)
-            except Exception as exc:
-                errors.append(str(exc))
-                step["summary"] = f"crashed: {exc}"
-                logger.exception("HF SegFormer detect crashed: %s", exc)
-    elif not (settings.hf_token or "").strip():
-        logger.warning("DETECT skip hf_segformer reason=HF_TOKEN_missing")
-    else:
-        logger.warning("DETECT skip hf_segformer reason=ENABLE_SEGFORMER_false")
+    try:
+        regions = await detect_segformer_regions(image_path)
+    except StructureDetectError as exc:
+        last_err = exc
+        logger.error("SegFormer detect failed: %s", exc)
+    except Exception as exc:
+        last_err = StructureDetectError(str(exc))
+        logger.exception("SegFormer detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-    windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
-    need_enrich = (not regions) or non_wall < 2 or windows < 2
-    logger.info(
-        "DETECT enrich_check need=%s after_segformer %s",
-        need_enrich,
-        format_summary(regions),
+    settings = get_settings()
+    need_parts = non_wall < 2
+    if need_parts and (settings.replicate_api_token or "").strip():
+        try:
+            from app.services.grounded_detect import detect_grounded_regions
+            from app.services.segformer import _merge_region_lists
+
+            grounded = await detect_grounded_regions(image_path)
+            regions = _merge_region_lists(regions, grounded)
+        except StructureDetectError as exc:
+            logger.error("Grounded-SAM detect failed: %s", exc)
+            if not regions:
+                last_err = exc
+        except Exception as exc:
+            logger.exception("Grounded-SAM detect crashed: %s", exc)
+            if not regions:
+                last_err = StructureDetectError(str(exc))
+
+    if regions:
+        return regions
+
+    # Always try OpenCV fallback instead of returning 503 when cloud AI is down/misconfigured
+    try:
+        from fastapi.concurrency import run_in_threadpool
+
+        fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
+        if fallback:
+            if last_err:
+                logger.warning("Cloud detect unavailable (%s); served OpenCV fallback", last_err)
+            return fallback
+    except Exception as exc:
+        logger.exception("OpenCV fallback failed: %s", exc)
+        last_err = StructureDetectError(str(exc))
+
+    if last_err:
+        raise last_err
+    raise StructureDetectError(
+        "No structure regions detected. Set HF_TOKEN for SegFormer "
+        "(or REPLICATE_API_TOKEN for Grounded-SAM backup)."
     )
-
-    if need_enrich and (settings.replicate_api_token or "").strip():
-        openings_only = bool(regions) and windows < 2
-        with timed_step(
-            logger,
-            "replicate_enrich",
-            mode="openings_only" if openings_only else "full",
-            image=image_path.name,
-        ) as step:
-            try:
-                from app.services.grounded_detect import detect_grounded_regions
-
-                grounded = await detect_grounded_regions(image_path, openings_only=openings_only)
-                before = format_summary(regions)
-                regions = _merge_region_lists(regions, grounded) if regions else grounded
-                step["summary"] = f"before=({before}) after=({format_summary(regions)})"
-                pipeline.append("replicate_openings" if openings_only else "replicate_full")
-            except StructureDetectError as exc:
-                errors.append(str(exc))
-                logger.error("Replicate detect failed: %s", exc)
-            except Exception as exc:
-                errors.append(str(exc))
-                logger.exception("Replicate detect crashed: %s", exc)
-    elif need_enrich:
-        logger.warning("DETECT skip replicate_enrich reason=REPLICATE_API_TOKEN_missing")
-
-    non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-    if (not regions or non_wall < 2) and settings.enable_gemini_region_detect:
-        if (settings.gemini_api_key or "").strip():
-            with timed_step(logger, "gemini_vision", image=image_path.name) as step:
-                try:
-                    gemini = await run_in_threadpool(_detect_structure_regions_gemini_sync, image_path)
-                    if gemini:
-                        regions = _merge_region_lists(regions, gemini) if regions else gemini
-                        step["summary"] = format_summary(regions)
-                        pipeline.append("gemini_vision")
-                    else:
-                        step["summary"] = "empty"
-                except Exception as exc:
-                    errors.append(str(exc))
-                    logger.exception("Gemini vision detect crashed: %s", exc)
-
-    if not regions:
-        primary = errors[0] if errors else ""
-        logger.error(
-            "DETECT pipeline empty errors=%s pipeline=%s",
-            errors,
-            pipeline,
-        )
-        hint = (
-            "Detect needs HF_TOKEN (SegFormer) and/or REPLICATE_API_TOKEN "
-            "(Grounded-SAM + Grounding-DINO fallback). Or draw regions manually."
-        )
-        if primary:
-            raise StructureDetectError(f"{primary} — {hint}")
-        raise StructureDetectError(hint)
-
-    if settings.enable_gemini_region_refine and (settings.gemini_api_key or "").strip():
-        with timed_step(logger, "gemini_refine", image=image_path.name) as step:
-            try:
-                refined = await run_in_threadpool(_refine_regions_gemini_sync, image_path, regions)
-                if refined:
-                    step["summary"] = f"{format_summary(regions)} → {format_summary(refined)}"
-                    pipeline.append("gemini_refine")
-                    logger.info("DETECT pipeline done steps=%s %s", " > ".join(pipeline), format_summary(refined))
-                    return refined
-                step["summary"] = "unchanged"
-            except Exception as exc:
-                logger.warning("Gemini refine skipped: %s", exc)
-
-    logger.info("DETECT pipeline done steps=%s %s", " > ".join(pipeline) or "none", format_summary(regions))
-    return regions
 
 
 def build_redesign_prompt(material_summary: str) -> str:
