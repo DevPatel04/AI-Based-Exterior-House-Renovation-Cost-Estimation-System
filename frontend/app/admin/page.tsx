@@ -47,7 +47,8 @@ export default function AdminPage() {
   }, []);
 
   async function assign(u: any) {
-    const role = selection[u.id] || "contractor";
+    const current = u.roles?.[0]?.name || "homeowner";
+    const role = selection[u.id] || current;
     setSavingId(u.id);
     try {
       await api.assignRole(u.id, role);
@@ -118,6 +119,8 @@ export default function AdminPage() {
           <ul className="divide-y divide-slate-100">
             {filtered.map((u) => {
               const roles: string[] = u.roles?.map((r: any) => r.name) || [];
+              const currentRole = roles[0] || "homeowner";
+              const selectedRole = selection[u.id] || currentRole;
               const selectId = `role-${u.id}`;
               return (
                 <li key={u.id} className="flex flex-col gap-4 p-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
@@ -154,7 +157,7 @@ export default function AdminPage() {
                     <select
                       id={selectId}
                       className="input w-full sm:w-44"
-                      value={selection[u.id] || "contractor"}
+                      value={selectedRole}
                       onChange={(e) => setSelection({ ...selection, [u.id]: e.target.value })}
                     >
                       {ROLES.map((r) => (
