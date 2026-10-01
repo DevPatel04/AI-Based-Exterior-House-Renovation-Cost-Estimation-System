@@ -383,6 +383,22 @@ def _iou_norm(a: list[dict], b: list[dict]) -> float:
     return inter / (area_a + area_b - inter)
 
 
+def _containment_like(inner: list[dict], outer: list[dict], thr: float = 0.7) -> bool:
+    """True if most of inner's bbox lies inside outer."""
+    def box(pts):
+        xs = [p["x"] for p in pts]
+        ys = [p["y"] for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    ax0, ay0, ax1, ay1 = box(inner)
+    bx0, by0, bx1, by1 = box(outer)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    area_a = max(1e-9, (ax1 - ax0) * (ay1 - ay0))
+    return (inter / area_a) >= thr
+
+
 def _merge_region_lists(*lists: list[dict]) -> list[dict]:
     """
     Merge detections with class-aware NMS and source priority.
@@ -437,6 +453,34 @@ def _merge_region_lists(*lists: list[dict]) -> list[dict]:
             None,
         )
         if dup is not None:
+            # Prefer tighter opening when one box nests inside another
+            if r["region_type"] in {
+                RegionType.window.value,
+                RegionType.gate.value,
+                RegionType.balcony.value,
+            }:
+                if _poly_area(r["points"]) < _poly_area(dup["points"]) * 0.9 and (
+                    _source_rank(r) >= _source_rank(dup)
+                    or float(r.get("confidence") or 0) >= float(dup.get("confidence") or 0) - 0.05
+                ):
+                    kept[kept.index(dup)] = r
+            continue
+        # Nested containment (IoU may be low if sizes differ a lot)
+        nest = next(
+            (
+                k
+                for k in kept
+                if k["region_type"] == r["region_type"]
+                and (
+                    _containment_like(r["points"], k["points"])
+                    or _containment_like(k["points"], r["points"])
+                )
+            ),
+            None,
+        )
+        if nest is not None:
+            if _poly_area(r["points"]) < _poly_area(nest["points"]) * 0.9:
+                kept[kept.index(nest)] = r
             continue
         # If CMP already has this opening, skip ADE-only near-duplicates of any opening type
         if str(r.get("source") or "").startswith("ade"):
@@ -507,8 +551,10 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     mean_win_conf = (
         sum(float(r.get("confidence") or 0.5) for r in windows) / len(windows) if windows else 0.0
     )
-    # Enrich unless we already have a solid opening set
-    if len(windows) >= 4 and len(doors) >= 1 and mean_win_conf >= 0.7:
+    # Enrich unless we already have a solid opening set (avoid sign/wall false windows)
+    if len(windows) >= 2 and (len(doors) >= 1 or mean_win_conf >= 0.65):
+        return regions
+    if len(windows) >= 3 and mean_win_conf >= 0.6:
         return regions
 
     h, w = image_rgb.shape[:2]

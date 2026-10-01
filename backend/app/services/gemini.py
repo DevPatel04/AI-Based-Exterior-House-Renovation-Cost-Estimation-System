@@ -28,23 +28,34 @@ from app.services.segformer import StructureDetectError
 
 logger = logging.getLogger(__name__)
 
-_DETECT_PROMPT = """You are a facade structure detector for house renovation.
+_DETECT_PROMPT = """You are an expert facade surveyor for house renovation photos.
 
-Detect every visible exterior part of the building in this photo.
-Return ONLY a JSON array (no markdown). Each item:
+Return ONLY a JSON array (no markdown, no commentary). Each item:
 {
   "label": one of ["main_wall","window","gate","balcony","roof_edge","railing","pillar","parapet"],
   "box_2d": [ymin, xmin, ymax, xmax],
   "confidence": number 0 to 1
 }
 
-Rules:
-- box_2d coordinates are integers normalized to 0-1000 (ymin,xmin,ymax,xmax).
-- Include EACH window separately.
-- Include the main facade wall once (largest building face).
-- Include door/gate if visible.
-- Include roof_edge if the roof line is visible.
-- Do not invent parts you cannot see.
+box_2d = integers 0–1000 (normalized). Draw TIGHT boxes hugging the feature edges.
+
+Detect ONLY real building architecture:
+- main_wall: the main exterior wall face once (largest plaster/brick facade).
+- window: each glazed window opening separately (glass + frame). One box per opening.
+- gate: each exterior door / entrance / metal gate (frame + opening). Not interior furniture.
+- roof_edge: the top roof / eave line band if visible.
+- balcony / railing / pillar / parapet only if clearly visible.
+
+STRICT exclusions — never label these as window or gate:
+- signs, posters, boards, nameplates, menus
+- people, vehicles, bicycles, plants, furniture
+- sky, ground, pavement, trees
+- wall stains, shadows, vents, AC units, light fixtures
+- nested or duplicate boxes for the same opening (pick the tightest one)
+
+Quality:
+- Prefer fewer high-confidence boxes over many guessed ones.
+- confidence < 0.55 → omit that detection.
 - Empty array if this is not a building exterior.
 """
 
@@ -159,6 +170,156 @@ def _pretty_detect_label(rtype: str) -> str:
     return defaults.get(rtype, rtype.replace("_", " ").title())
 
 
+def _region_bbox(points: list[dict]) -> tuple[float, float, float, float]:
+    xs = [float(p["x"]) for p in points]
+    ys = [float(p["y"]) for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _region_area(points: list[dict]) -> float:
+    x0, y0, x1, y1 = _region_bbox(points)
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+
+def _region_iou(a: list[dict], b: list[dict]) -> float:
+    ax0, ay0, ax1, ay1 = _region_bbox(a)
+    bx0, by0, bx1, by1 = _region_bbox(b)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0:
+        return 0.0
+    union = _region_area(a) + _region_area(b) - inter
+    return inter / max(1e-9, union)
+
+
+def _containment_ratio(inner: list[dict], outer: list[dict]) -> float:
+    """How much of inner's area sits inside outer's bbox."""
+    ax0, ay0, ax1, ay1 = _region_bbox(inner)
+    bx0, by0, bx1, by1 = _region_bbox(outer)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    return inter / max(1e-9, _region_area(inner))
+
+
+def _refine_gemini_regions(regions: list[dict]) -> list[dict]:
+    """Drop noise, oversized openings, nested duplicates; keep tight high-conf boxes."""
+    from app.models import RegionType
+
+    cleaned: list[dict] = []
+    for r in regions:
+        rtype = r.get("region_type")
+        pts = r.get("points") or []
+        if len(pts) < 4:
+            continue
+        area = _region_area(pts)
+        x0, y0, x1, y1 = _region_bbox(pts)
+        w, h = max(1e-6, x1 - x0), max(1e-6, y1 - y0)
+        aspect = w / h
+        conf = float(r.get("confidence") or 0.5)
+
+        if conf < 0.5 and rtype != RegionType.main_wall.value:
+            continue
+
+        if rtype == RegionType.window.value:
+            # Tiny wall patches / signs
+            if area < 0.004 or area > 0.14:
+                continue
+            # Extreme skinny/wide unlikely for a real window
+            if aspect < 0.35 or aspect > 3.2:
+                continue
+        elif rtype == RegionType.gate.value:
+            if area < 0.008 or area > 0.35:
+                continue
+            # Gates/doors are usually taller than wide, near mid-lower facade
+            cy = (y0 + y1) / 2
+            if aspect > 1.6 and area < 0.04:
+                continue
+            if cy < 0.25:
+                continue
+        elif rtype == RegionType.main_wall.value:
+            if area < 0.08:
+                continue
+        elif rtype == RegionType.roof_edge.value:
+            if area < 0.01 or h > 0.25:
+                continue
+        cleaned.append(r)
+
+    # Prefer higher confidence, then smaller (tighter) boxes for openings
+    cleaned.sort(
+        key=lambda r: (
+            float(r.get("confidence") or 0),
+            -_region_area(r["points"]) if r.get("region_type") != "main_wall" else _region_area(r["points"]),
+        ),
+        reverse=True,
+    )
+
+    kept: list[dict] = []
+    for r in cleaned:
+        rtype = r["region_type"]
+        drop = False
+        replace_at: int | None = None
+        for i, k in enumerate(kept):
+            if k["region_type"] != rtype:
+                continue
+            iou = _region_iou(k["points"], r["points"])
+            r_in_k = _containment_ratio(r["points"], k["points"])
+            k_in_r = _containment_ratio(k["points"], r["points"])
+            nested = r_in_k > 0.65 or k_in_r > 0.65
+            thr = 0.35 if rtype in {"window", "gate"} else 0.45
+            if not nested and iou <= thr:
+                continue
+            # Prefer the tighter (smaller) box for nested / overlapping openings
+            if rtype in {"window", "gate", "balcony"} and _region_area(r["points"]) < _region_area(
+                k["points"]
+            ) * 0.92:
+                replace_at = i
+                break
+            drop = True
+            break
+        if drop:
+            continue
+        if replace_at is not None:
+            kept[replace_at] = r
+        else:
+            kept.append(r)
+
+    # Cap noisy window floods
+    walls = [r for r in kept if r["region_type"] == RegionType.main_wall.value][:1]
+    roofs = [r for r in kept if r["region_type"] == RegionType.roof_edge.value][:1]
+    gates = [r for r in kept if r["region_type"] == RegionType.gate.value][:3]
+    windows = [r for r in kept if r["region_type"] == RegionType.window.value][:8]
+    other = [
+        r
+        for r in kept
+        if r["region_type"]
+        not in {
+            RegionType.main_wall.value,
+            RegionType.roof_edge.value,
+            RegionType.gate.value,
+            RegionType.window.value,
+        }
+    ][:6]
+
+    out = walls + roofs + gates + windows + other
+    win_i = 0
+    for r in out:
+        if r["region_type"] == RegionType.window.value:
+            win_i += 1
+            r["label"] = f"Window {win_i}" if len(windows) > 1 else "Window"
+        elif not r.get("label"):
+            r["label"] = _pretty_detect_label(r["region_type"])
+    logger.info(
+        "DETECT gemini refined %s → %s (windows=%s gates=%s)",
+        len(regions),
+        len(out),
+        len(windows),
+        len(gates),
+    )
+    return out
+
+
 def _parse_gemini_detect_payload(data) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("regions") or data.get("detections") or data.get("items") or []
@@ -195,8 +356,7 @@ def _parse_gemini_detect_payload(data) -> list[dict]:
         )
     if not regions:
         raise StructureDetectError("Gemini detect returned no facade regions.")
-    return regions
-
+    return _refine_gemini_regions(regions)
 
 def _gemini_key_invalid_message(resp_text: str = "") -> str | None:
     """Return a user-facing message if Google rejected the API key."""
@@ -382,20 +542,30 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
         try:
             regions = await detect_gemini_regions(image_path)
             engines_used.append("gemini")
-            try:
-                from PIL import Image
-                import numpy as np
+            # Only OpenCV-enrich when Gemini missed openings — enrich adds false windows/signs
+            gem_wins = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
+            gem_doors = sum(1 for r in regions if r.get("region_type") == RegionType.gate.value)
+            if gem_wins < 2 and gem_doors < 1:
+                try:
+                    from PIL import Image
+                    import numpy as np
 
-                def _enrich():
-                    rgb = np.array(Image.open(image_path).convert("RGB"))
-                    return enrich_with_opencv_parts(rgb, regions)
+                    def _enrich():
+                        rgb = np.array(Image.open(image_path).convert("RGB"))
+                        return enrich_with_opencv_parts(rgb, regions)
 
-                before = len(regions)
-                regions = await run_in_threadpool(_enrich)
-                if len(regions) > before and "opencv" not in engines_used:
-                    engines_used.append("opencv")
-            except Exception as enrich_exc:
-                logger.warning("DETECT post-Gemini OpenCV enrich skipped: %s", enrich_exc)
+                    before = len(regions)
+                    regions = await run_in_threadpool(_enrich)
+                    if len(regions) > before and "opencv" not in engines_used:
+                        engines_used.append("opencv")
+                except Exception as enrich_exc:
+                    logger.warning("DETECT post-Gemini OpenCV enrich skipped: %s", enrich_exc)
+            else:
+                logger.info(
+                    "DETECT skip OpenCV enrich after Gemini (windows=%s doors=%s)",
+                    gem_wins,
+                    gem_doors,
+                )
         except StructureDetectError as exc:
             last_err = exc
             gemini_note = str(exc)[:180]
