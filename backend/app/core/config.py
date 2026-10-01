@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 WEAK_SECRETS = {
     "",
     "change-me-in-production",
+    "change-me-in-production-use-long-random-string",
     "change-me-to-a-long-random-string",
     "your-secret-key",
 }

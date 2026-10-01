@@ -48,7 +48,7 @@ git push origin develop
 | Variable                | Value                                                          |
 | ----------------------- | -------------------------------------------------------------- |
 | `DATABASE_URL`          | `${{Postgres.DATABASE_URL}}` (Railway reference)               |
-| `SECRET_KEY`             | long random string (32+ chars) — required outside development |
+| `SECRET_KEY`             | **required** — 32+ random chars (boot fails if missing/weak when `ENVIRONMENT=production`) |
 | `ADMIN_EMAIL`            | optional; only creates seed admin when set with ADMIN_PASSWORD |
 | `ADMIN_PASSWORD`         | optional; never use `admin123` in production                   |
 | `ENVIRONMENT`           | `production`                                                   |
@@ -56,21 +56,18 @@ git push origin develop
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
 | `GEMINI_API_KEY`        | optional — **not required** for redesign                       |
 | `ENABLE_GEMINI_HQ`      | `false` (leave off unless you have Gemini image quota)         |
-| `ENABLE_POLLINATIONS_NANOBANANA` | `true` — primary free redesign (Nano Banana via Pollinations) |
-| `POLLINATIONS_API_KEY` | **required for Pollinations** — free key from https://enter.pollinations.ai/keys (anonymous calls return 401) |
-| `POLLINATIONS_NANOBANANA_MODEL` | default `nanobanana` |
-| `CLOUDFLARE_ACCOUNT_ID` | **backup free redesign** — Cloudflare account id |
-| `CLOUDFLARE_API_TOKEN` | **backup free redesign** — Workers AI REST API token |
+| `CLOUDFLARE_ACCOUNT_ID` | **required for redesign** — Cloudflare account id |
+| `CLOUDFLARE_API_TOKEN` | **required for redesign** — Workers AI REST API token |
 | `CLOUDFLARE_IMAGE_MODEL` | default `@cf/bytedance/stable-diffusion-xl-lightning` |
 | `ENABLE_CLOUDFLARE_REDESIGN` | `true` |
-| `HF_TOKEN`              | **required for Detect** — also optional redesign backup        |
-| `ENABLE_HF_IMG2IMG`     | `true` — uses HF free monthly credits as redesign backup       |
+| `ENABLE_POLLINATIONS_NANOBANANA` | `false` (Cloudflare-only redesign) |
+| `HF_TOKEN`              | **recommended for Detect** — SegFormer facade segmentation |
 | `ENABLE_SEGFORMER`      | `true`                                                         |
-| `SEGFORMER_MODEL`       | default `nvidia/segformer-b0-finetuned-ade-512-512`            |
-| `ENABLE_DEPTH_SCALE`    | `true` (Depth Anything V2 scale when `HF_TOKEN` / Replicate set) |
-| `REPLICATE_API_TOKEN`   | optional — better ControlNet redesign + detect openings backup |
-| `ENABLE_REPLICATE_CONTROLNET` | `true`                                                   |
-| `REPLICATE_CONTROLNET_MODEL` | default `lucataco/sdxl-controlnet`                          |
+| `ENABLE_DEPTH_SCALE`    | `true` |
+| `REPLICATE_API_TOKEN`   | optional — Grounded-SAM detect backup only |
+| `ENABLE_NANO_BANANA` | `false` |
+| `ENABLE_REPLICATE_IMG2IMG` | `false` |
+| `ENABLE_REPLICATE_CONTROLNET` | `false` |
 | `REPLICATE_SEG_MODEL`   | default `schananas/grounded_sam` (detect backup)               |
 | `FAL_KEY`               | optional — only if you have fal credits                        |
 | `ENABLE_FAL_CONTROLNET` | `true`                                                         |
