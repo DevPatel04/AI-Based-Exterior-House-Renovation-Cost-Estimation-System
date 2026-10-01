@@ -189,15 +189,14 @@ async def visualize(
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI redesign unavailable — not using the green local preview. "
+                "AI redesign unavailable. "
                 + " | ".join(exc.notes)
-                + " Fix free redesign: set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
-                "(Workers AI REST API — free daily Neurons), or REPLICATE_API_TOKEN, "
-                "or ALLOW_LOCAL_REDESIGN_FALLBACK=true for demo mode only."
+                + " Set a valid REPLICATE_API_TOKEN for google/nano-banana-2, "
+                + "or ALLOW_LOCAL_REDESIGN_FALLBACK=true for a real-photo material preview."
             ),
         ) from exc
     design.redesign_path = rel
-    note_suffix = f" :: {' | '.join(notes)}" if notes and engine == "local_fallback" else ""
+    note_suffix = f" :: {' | '.join(notes)}" if notes and engine in {"local_fallback", "photo_edit"} else ""
     design.prompt_used = f"[{engine}] {prompt}{note_suffix}"
     design.hq_mode = payload.hq_mode
     design.is_active = True

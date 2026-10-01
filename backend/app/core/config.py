@@ -57,19 +57,24 @@ class Settings(BaseSettings):
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 20
 
-    # Replicate redesign (img2img preferred for accuracy; ControlNet as backup)
+    # Replicate redesign — Nano Banana 2 (Google) first, then SDXL img2img / ControlNet
     replicate_api_token: str = ""
+    enable_nano_banana: bool = True
+    nano_banana_model: str = "google/nano-banana-2"
+    nano_banana_resolution: str = "1K"  # 1K | 2K | 4K (HQ uses 2K)
     enable_replicate_img2img: bool = True
     replicate_img2img_model: str = "lucataco/sdxl"
-    replicate_img2img_strength: float = 0.42  # lower = closer to original photo
-    replicate_img2img_steps: int = 20
+    replicate_img2img_strength: float = 0.32  # lower = closer to original photo (less cartoon)
+    replicate_img2img_steps: int = 28
     enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85
-    replicate_controlnet_steps: int = 20
+    replicate_controlnet_steps: int = 24
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
-    # Green-overlay PIL preview when all AI engines fail (off by default — prefer a clear error)
-    allow_local_redesign_fallback: bool = False
+    # Cloudflare lightning invents cartoon houses — off by default
+    enable_cloudflare_redesign: bool = False
+    # Real-photo material preview when AI engines fail
+    allow_local_redesign_fallback: bool = True
 
     # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
     hf_token: str = ""

@@ -115,10 +115,13 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
 
 def build_redesign_prompt(material_summary: str) -> str:
     return (
-        "Photorealistic DSLR photo of this exact same residential house exterior, "
-        "same camera angle, same roof silhouette, same window and door positions. "
-        "Only change surface materials/finishes — do not invent new architecture. "
-        f"Materials to apply: {material_summary}. "
-        "Natural daylight, real textures, sharp details, no CGI look, no illustration, "
-        "no people, no text, no watermark."
+        "Ultra-realistic exterior photograph of THIS exact house — keep the identical "
+        "camera angle, roof shape, porch, window count, door position, landscaping, and sky. "
+        "This is an image-to-image edit of a real photo, not a new drawing. "
+        "Only replace cladding / paint / roof / trim finishes with: "
+        f"{material_summary}. "
+        "Show genuine building materials with real grain, mortar, metal seams, and soft natural daylight. "
+        "Photoreal DSLR look, 35mm, sharp focus, accurate perspective, natural colors. "
+        "Strictly avoid: cartoon, anime, illustration, painting, concept art, CGI, 3D render, "
+        "plastic skin, warped walls, melted windows, extra floors, different architecture."
     )

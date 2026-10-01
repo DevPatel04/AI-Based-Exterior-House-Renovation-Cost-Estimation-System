@@ -1,7 +1,7 @@
-"""Replicate SDXL img2img redesign — starts from the real house photo.
+"""Replicate google/nano-banana-2 redesign — Google image edit from the real house photo.
 
-Uses lucataco/sdxl with `image` + `prompt_strength` so geometry stays closer to
-the original than text-only / loose generative models.
+Uses image_input + prompt so materials change while keeping the facade photoreal.
+Docs: https://replicate.com/google/nano-banana-2/api
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import httpx
 from PIL import Image
 
 from app.core.config import get_settings
-from app.services.image_control import data_uri_png
 from app.services.storage import ensure_upload_dirs
 
 logger = logging.getLogger(__name__)
@@ -29,6 +28,15 @@ def _clean_token(raw: str) -> str:
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     return token
+
+
+def _data_uri_jpeg(path: Path, max_edge: int = 1536) -> str:
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}"
 
 
 async def _download_image(url: str, client: httpx.AsyncClient) -> bytes | None:
@@ -44,65 +52,36 @@ async def _download_image(url: str, client: httpx.AsyncClient) -> bytes | None:
     return resp.content
 
 
-async def generate_replicate_img2img_redesign(
+async def generate_nano_banana_redesign(
     source_path: Path,
     prompt: str,
     hq_mode: bool = False,
 ) -> tuple[str | None, str | None]:
     """
-    Img2img from the original exterior photo.
-    Lower prompt_strength = more accurate structure; higher = stronger material change.
+    Call google/nano-banana-2 with the house photo as image_input.
+    Returns (relative_path, error_message).
     """
     settings = get_settings()
     token = _clean_token(settings.replicate_api_token or "")
-    if not token or not settings.enable_replicate_img2img:
-        return None, "REPLICATE_API_TOKEN missing or ENABLE_REPLICATE_IMG2IMG=false"
+    if not token or not settings.enable_nano_banana:
+        return None, "REPLICATE_API_TOKEN missing or ENABLE_NANO_BANANA=false"
 
-    model = (settings.replicate_img2img_model or "lucataco/sdxl").strip()
+    model = (settings.nano_banana_model or "google/nano-banana-2").strip()
     try:
-        src = Image.open(source_path).convert("RGB")
-        # SDXL prefers multiples of 8 near 1024
-        src.thumbnail((1024, 1024))
-        w, h = src.size
-        w8, h8 = max(768, (w // 8) * 8), max(768, (h // 8) * 8)
-        if (w8, h8) != (w, h):
-            src = src.resize((w8, h8), Image.Resampling.LANCZOS)
-        buf = io.BytesIO()
-        src.save(buf, format="PNG")
-        source_uri = data_uri_png(buf.getvalue())
-        width, height = src.size
+        image_uri = _data_uri_jpeg(source_path, max_edge=2048 if hq_mode else 1536)
     except Exception as exc:
         return None, f"could not read image: {exc}"
 
-    # Keep structure tight so the house stays photoreal (not reinvented).
-    strength = float(settings.replicate_img2img_strength or 0.32)
-    if hq_mode:
-        strength = min(0.45, strength + 0.06)
-    steps = int(settings.replicate_img2img_steps or 28)
-    if hq_mode:
-        steps = min(40, steps + 6)
-
-    negative = (
-        "cartoon, anime, illustration, painting, concept art, sketch, comic book, "
-        "CGI, 3d render, unreal engine, plastic look, oversaturated, fake textures, "
-        "blurry, distorted geometry, warped windows, melted glass, extra floors, "
-        "different building layout, invented architecture, people, text, watermark, "
-        "low quality, morphing walls, dollhouse, toy"
-    )
+    resolution = "2K" if hq_mode else (settings.nano_banana_resolution or "1K")
     payload = {
         "input": {
             "prompt": prompt,
-            "negative_prompt": negative,
-            "image": source_uri,
-            "prompt_strength": strength,
-            "num_inference_steps": steps,
-            "guidance_scale": 5.5,
-            "num_outputs": 1,
-            "width": width,
-            "height": height,
-            "scheduler": "K_EULER",
-            "refine": "no_refiner",
-            "apply_watermark": False,
+            "image_input": [image_uri],
+            "aspect_ratio": "match_input_image",
+            "resolution": resolution,
+            "output_format": "jpg",
+            "google_search": False,
+            "image_search": False,
         }
     }
     headers = {
@@ -112,14 +91,12 @@ async def generate_replicate_img2img_redesign(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             logger.info(
-                "REDESIGN replicate_img2img start model=%s strength=%s steps=%s size=%sx%s",
+                "REDESIGN nano_banana start model=%s resolution=%s hq=%s",
                 model,
-                strength,
-                steps,
-                width,
-                height,
+                resolution,
+                hq_mode,
             )
             resp = await client.post(
                 f"https://api.replicate.com/v1/models/{model}/predictions",
@@ -131,13 +108,13 @@ async def generate_replicate_img2img_redesign(
                     f"HTTP {resp.status_code} invalid REPLICATE_API_TOKEN — "
                     "set a valid token from https://replicate.com/account/api-tokens"
                 )
-                logger.error("REDESIGN replicate_img2img auth_fail %s", err)
+                logger.error("REDESIGN nano_banana auth_fail %s", err)
                 return None, err
             if resp.status_code == 429:
                 return None, "HTTP 429 rate limit / no credits — check https://replicate.com/account"
             if resp.status_code >= 400:
-                err = f"HTTP {resp.status_code}: {resp.text[:180]}"
-                logger.warning("REDESIGN replicate_img2img %s", err)
+                err = f"HTTP {resp.status_code}: {resp.text[:220]}"
+                logger.warning("REDESIGN nano_banana %s", err)
                 return None, err
 
             data = resp.json()
@@ -149,8 +126,8 @@ async def generate_replicate_img2img_redesign(
             if not output and get_url:
                 import asyncio
 
-                logger.info("REDESIGN replicate_img2img polling id=%s status=%s", pred_id, status)
-                for _ in range(40):
+                logger.info("REDESIGN nano_banana polling id=%s status=%s", pred_id, status)
+                for _ in range(60):
                     st = await client.get(get_url, headers={"Authorization": f"Bearer {token}"})
                     if st.status_code >= 400:
                         return None, f"poll HTTP {st.status_code}"
@@ -160,27 +137,34 @@ async def generate_replicate_img2img_redesign(
                         output = body.get("output")
                         break
                     if status in {"failed", "canceled"}:
-                        return None, f"prediction {status}: {(body.get('error') or '')[:160]}"
+                        return None, f"prediction {status}: {(body.get('error') or '')[:180]}"
                     await asyncio.sleep(1.5)
 
             if not output:
-                return None, "no output from Replicate img2img"
-            img_url = output[0] if isinstance(output, list) else output
-            if not isinstance(img_url, str):
+                return None, "no output from nano-banana-2"
+            # Output is typically a single URI string; sometimes a list
+            if isinstance(output, list):
+                img_url = next((u for u in output if isinstance(u, str)), None)
+            elif isinstance(output, str):
+                img_url = output
+            else:
                 return None, f"unexpected output type: {type(output).__name__}"
+            if not img_url:
+                return None, "empty output URL from nano-banana-2"
+
             raw = await _download_image(img_url, client)
             if not raw:
-                return None, "could not download result image"
+                return None, "could not download nano-banana-2 result"
 
             root = ensure_upload_dirs()
-            name = f"{uuid.uuid4().hex}.png"
+            name = f"{uuid.uuid4().hex}.jpg"
             dest = root / "redesigns" / name
             try:
-                Image.open(io.BytesIO(raw)).convert("RGB").save(dest, format="PNG")
+                Image.open(io.BytesIO(raw)).convert("RGB").save(dest, format="JPEG", quality=93)
             except Exception:
                 dest.write_bytes(raw)
-            logger.info("REDESIGN replicate_img2img ok id=%s path=redesigns/%s", pred_id, name)
+            logger.info("REDESIGN nano_banana ok id=%s path=redesigns/%s", pred_id, name)
             return f"redesigns/{name}", None
     except Exception as exc:
-        logger.exception("REDESIGN replicate_img2img exception")
+        logger.exception("REDESIGN nano_banana exception")
         return None, str(exc)[:200]

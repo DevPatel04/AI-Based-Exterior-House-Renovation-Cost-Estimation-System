@@ -890,8 +890,8 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Uses Replicate SDXL img2img from your photo (accurate facade). ControlNet / Cloudflare only if img2img fails.`
-              : "Generate a redesigned view of your house using your selected materials."
+              ? `Generate a photoreal redesign with google/nano-banana-2 from your photo (materials on “${activeDesign.name}”).`
+              : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
             <>
@@ -899,7 +899,7 @@ export default function ProjectWorkspacePage() {
                 className="btn-outline"
                 onClick={() => runVisualize(true)}
                 disabled={busy}
-                title="Stronger free render (more Cloudflare steps) — Gemini not required"
+                title="Nano Banana 2 at 2K resolution"
               >
                 <Icon name="sparkles" /> HQ render
               </button>
@@ -927,6 +927,9 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[nano_banana]") && (
+                  <Badge tone="brand">Nano Banana 2</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[replicate_img2img]") && (
                   <Badge tone="brand">Replicate img2img</Badge>
                 )}
@@ -935,6 +938,9 @@ export default function ProjectWorkspacePage() {
                 )}
                 {activeDesign?.prompt_used?.includes("[fal_controlnet]") && (
                   <Badge tone="brand">fal ControlNet</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("[photo_edit]") && (
+                  <Badge tone="brand">Photo edit (real)</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[gemini_hq]") && (
                   <Badge tone="violet">Gemini HQ</Badge>

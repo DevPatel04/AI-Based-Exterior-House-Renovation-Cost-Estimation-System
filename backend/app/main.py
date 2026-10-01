@@ -25,6 +25,7 @@ for _name in (
     "app.services.cloudflare",
     "app.services.replicate_controlnet",
     "app.services.replicate_img2img",
+    "app.services.replicate_nano_banana",
 ):
     logging.getLogger(_name).setLevel(logging.INFO)
 
