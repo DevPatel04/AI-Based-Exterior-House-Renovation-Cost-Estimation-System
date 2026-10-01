@@ -44,14 +44,118 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
     return await run_in_threadpool(_gemini_quality_notes_sync, image_path)
 
 
+def _refine_regions_gemini_sync(image_path: Path, regions: list[dict]) -> list[dict]:
+    """
+    Accuracy pass: Gemini adjusts / adds / removes region polygons.
+    Only used when GEMINI_API_KEY is set. Does not invent hardcoded defaults.
+    """
+    settings = get_settings()
+    if not (settings.gemini_api_key or "").strip():
+        return regions
+    if not regions:
+        return regions
+
+    valid_types = {
+        "main_wall",
+        "window",
+        "balcony",
+        "pillar",
+        "parapet",
+        "gate",
+        "roof_edge",
+        "railing",
+        "other",
+    }
+    seed = [
+        {
+            "region_type": r.get("region_type"),
+            "label": r.get("label"),
+            "points": r.get("points"),
+            "confidence": r.get("confidence"),
+        }
+        for r in regions
+    ]
+    prompt = f"""
+You are refining exterior house structure regions for renovation estimating.
+Current draft regions (normalized 0-1 image coords) JSON:
+{json.dumps(seed)[:6000]}
+
+Return ONLY a JSON array of improved regions. Each item:
+{{
+  "region_type": one of {sorted(valid_types)},
+  "label": short string,
+  "points": [{{"x":0-1,"y":0-1}}, ...] polygon with 4-8 points tightly around the part,
+  "confidence": 0-1
+}}
+
+Rules:
+- Fit polygons tightly to visible walls, windows, doors/gates, balconies, pillars, railings, parapet, roof edges.
+- Remove false boxes on sky, trees, ground, cars.
+- Keep the main facade wall as one (or two) polygon(s).
+- Separate each window; do not merge all windows into one box.
+- Prefer accuracy over quantity. If unsure, omit.
+"""
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=settings.gemini_api_key)
+        model = genai.GenerativeModel(settings.gemini_model)
+        uploaded = genai.upload_file(str(image_path))
+        result = model.generate_content([uploaded, prompt])
+        data = _extract_json(result.text or "[]")
+        if not isinstance(data, list) or not data:
+            return regions
+        cleaned: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            rtype = item.get("region_type")
+            if rtype not in valid_types:
+                continue
+            points = item.get("points") or []
+            if len(points) < 3:
+                continue
+            norm_pts = []
+            ok = True
+            for p in points[:10]:
+                try:
+                    x = float(p["x"])
+                    y = float(p["y"])
+                except Exception:
+                    ok = False
+                    break
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                    ok = False
+                    break
+                norm_pts.append({"x": round(x, 4), "y": round(y, 4)})
+            if not ok or len(norm_pts) < 3:
+                continue
+            cleaned.append(
+                {
+                    "region_type": rtype,
+                    "label": item.get("label") or rtype.replace("_", " ").title(),
+                    "points": norm_pts,
+                    "confidence": float(item.get("confidence") or 0.75),
+                    "source": "gemini_refine",
+                }
+            )
+        # Require at least a wall + one other part to accept refine
+        types = {c["region_type"] for c in cleaned}
+        if "main_wall" in types and len(cleaned) >= 2:
+            return cleaned
+        return regions
+    except Exception:
+        return regions
+
+
 async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
-    Structure detection (no hardcoded default boxes).
+    Structure detection with accuracy layers:
 
-    Order:
-      1) SegFormer ADE + CMP (merged) + OpenCV window/door enrich
-      2) If still walls-only and Replicate token set → Grounded-SAM merge
-      3) OpenCV-only fallback (so detect never hard-fails without tokens)
+      1) SegFormer ADE + CMP + OpenCV enrich
+      2) Grounded-SAM merge when still missing parts (Replicate)
+      3) OpenCV-only fallback if cloud AI unavailable
+      4) Gemini refine (when GEMINI_API_KEY set) to tighten boxes
     """
     import logging
 
@@ -89,28 +193,36 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             if not regions:
                 last_err = StructureDetectError(str(exc))
 
-    if regions:
-        return regions
+    if not regions:
+        try:
+            fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
+            if fallback:
+                if last_err:
+                    logger.warning("Cloud detect unavailable (%s); served OpenCV fallback", last_err)
+                regions = fallback
+        except Exception as exc:
+            logger.exception("OpenCV fallback failed: %s", exc)
+            last_err = StructureDetectError(str(exc))
 
-    # Always try OpenCV fallback instead of returning 503 when cloud AI is down/misconfigured
-    try:
-        from fastapi.concurrency import run_in_threadpool
+    if not regions:
+        if last_err:
+            raise last_err
+        raise StructureDetectError(
+            "No structure regions detected. Set HF_TOKEN for SegFormer "
+            "(or REPLICATE_API_TOKEN / GEMINI_API_KEY for better accuracy)."
+        )
 
-        fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
-        if fallback:
-            if last_err:
-                logger.warning("Cloud detect unavailable (%s); served OpenCV fallback", last_err)
-            return fallback
-    except Exception as exc:
-        logger.exception("OpenCV fallback failed: %s", exc)
-        last_err = StructureDetectError(str(exc))
+    # Final accuracy pass with Gemini when available
+    if (settings.gemini_api_key or "").strip():
+        try:
+            refined = await run_in_threadpool(_refine_regions_gemini_sync, image_path, regions)
+            if refined and len(refined) >= 2:
+                logger.info("Gemini refine: %s → %s regions", len(regions), len(refined))
+                return refined
+        except Exception as exc:
+            logger.warning("Gemini refine skipped: %s", exc)
 
-    if last_err:
-        raise last_err
-    raise StructureDetectError(
-        "No structure regions detected. Set HF_TOKEN for SegFormer "
-        "(or REPLICATE_API_TOKEN for Grounded-SAM backup)."
-    )
+    return regions
 
 
 def build_redesign_prompt(material_summary: str) -> str:

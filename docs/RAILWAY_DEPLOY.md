@@ -54,7 +54,7 @@ git push origin develop
 | `ENVIRONMENT`           | `production`                                                   |
 | `CORS_ORIGINS`          | your frontend URL, e.g. `https://frontend-xxxx.up.railway.app` |
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
-| `GEMINI_API_KEY`        | optional                                                       |
+| `GEMINI_API_KEY`        | optional — quality notes + **region refine** (best accuracy)   |
 | `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
 | `CLOUDFLARE_API_TOKEN`  | optional                                                       |
 | `ENABLE_GEMINI_HQ`      | `false`                                                        |
