@@ -73,7 +73,10 @@ export default function ProjectWorkspacePage() {
 
   const stepperRef = useRef<HTMLElement>(null);
   const firstStepRender = useRef(true);
+  const autoDetectStarted = useRef(false);
+  const autoVisualizeStarted = useRef(false);
   const autoEstimateStarted = useRef(false);
+  const autoReportStarted = useRef(false);
 
   // On step change: keep the active step visible in the (mobile) horizontal stepper and bring the
   // top of the new step into view if the user continued from further down the page.
@@ -160,6 +163,7 @@ export default function ProjectWorkspacePage() {
       setLastQuality({ ok: true, message: img.quality_message || "Uploaded" });
       await refresh();
       toast.success("Photo uploaded.");
+      autoDetectStarted.current = false;
       setStep(1);
     } catch (err: any) {
       toast.error(err.message);
@@ -186,8 +190,9 @@ export default function ProjectWorkspacePage() {
 
   // Long-running actions below only run from their own step, so they don't call setStep on
   // completion — that would pull the user back if they navigated elsewhere meanwhile.
-  async function detect() {
-    if (regions.length) {
+  async function detect(opts?: { auto?: boolean }) {
+    if (opts?.auto && regions.length) return;
+    if (regions.length && !opts?.auto) {
       const ok = window.confirm(
         "Re-detect will replace auto-detected regions. Manually edited regions are kept. Continue?"
       );
@@ -209,6 +214,7 @@ export default function ProjectWorkspacePage() {
       toast.success(`SegFormer detected ${regs.length} regions. Drag handles to fine-tune.`);
     } catch (err: any) {
       toast.error(err.message);
+      if (opts?.auto) autoDetectStarted.current = false;
     } finally {
       setBusy(false);
       setProgress("");
@@ -280,6 +286,7 @@ export default function ProjectWorkspacePage() {
       await api.activateDesign(projectId, designId);
       await refresh();
       toast.success("Materials saved on design.");
+      autoVisualizeStarted.current = false;
       setStep(3);
     } catch (err: any) {
       toast.error(err.message);
@@ -289,14 +296,15 @@ export default function ProjectWorkspacePage() {
     }
   }
 
-  async function runVisualize(hq = false) {
+  async function runVisualize(hq = false, opts?: { auto?: boolean }) {
     setBusy(true);
-    setProgress(hq ? "Generating high-quality redesign (Gemini)…" : "Generating redesign…");
+    setProgress(hq ? "Generating high-quality redesign…" : "Generating redesign…");
     try {
       const designId = await ensureDesign();
       // Persist current assignments onto this design so Design B (etc.) gets its own materials/prompt
       const items = buildAssignmentItems();
       if (!items) {
+        if (opts?.auto) autoVisualizeStarted.current = false;
         setStep(2);
         return;
       }
@@ -306,11 +314,11 @@ export default function ProjectWorkspacePage() {
       await refresh();
       setRedesignVersion((v) => v + 1);
       toast.success(hq ? "HQ redesign generated." : "Redesign generated.");
-      // Move to estimate — useEffect auto-starts Calculate the first time
+      // Ready for estimate — Calculate auto-starts when they continue to that step
       autoEstimateStarted.current = false;
-      setStep(4);
     } catch (err: any) {
       toast.error(err.message || "Redesign failed");
+      if (opts?.auto) autoVisualizeStarted.current = false;
     } finally {
       setBusy(false);
       setProgress("");
@@ -378,19 +386,6 @@ export default function ProjectWorkspacePage() {
     }
   }
 
-  // Auto-start calculate the first time the user reaches the estimate step
-  useEffect(() => {
-    if (step !== 4 || autoEstimateStarted.current || busy || loadError) return;
-    if (!regions.length) return;
-    if (costs?.lines?.length) {
-      autoEstimateStarted.current = true;
-      return;
-    }
-    autoEstimateStarted.current = true;
-    void runEstimate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, regions.length, costs?.lines?.length]);
-
   async function overrideArea(a: any, value: number) {
     setBusy(true);
     setProgress("Saving area override…");
@@ -455,7 +450,7 @@ export default function ProjectWorkspacePage() {
     }
   }
 
-  async function makeReport() {
+  async function makeReport(opts?: { auto?: boolean }) {
     setBusy(true);
     setProgress("Generating PDF report…");
     try {
@@ -467,11 +462,61 @@ export default function ProjectWorkspacePage() {
       toast.success("Report generated and downloaded.");
     } catch (err: any) {
       toast.error(err.message);
+      if (opts?.auto) autoReportStarted.current = false;
     } finally {
       setBusy(false);
       setProgress("");
     }
   }
+
+  // When the user opens a step, auto-start that step's main action the first time.
+  useEffect(() => {
+    if (step !== 1 || autoDetectStarted.current || busy || loadError || !primary) return;
+    if (regions.length) {
+      autoDetectStarted.current = true;
+      return;
+    }
+    autoDetectStarted.current = true;
+    void detect({ auto: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, busy, primary?.id, regions.length, loadError]);
+
+  useEffect(() => {
+    if (step !== 3 || autoVisualizeStarted.current || busy || loadError) return;
+    const hasAssignments = Object.values(assignments).some((id) => Number(id) > 0);
+    if (!hasAssignments) return;
+    if (activeDesign?.redesign_path) {
+      autoVisualizeStarted.current = true;
+      return;
+    }
+    autoVisualizeStarted.current = true;
+    void runVisualize(false, { auto: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, busy, activeDesign?.redesign_path, assignments, loadError]);
+
+  // Auto-start calculate the first time the user reaches the estimate step
+  useEffect(() => {
+    if (step !== 4 || autoEstimateStarted.current || busy || loadError) return;
+    if (!regions.length) return;
+    if (costs?.lines?.length) {
+      autoEstimateStarted.current = true;
+      return;
+    }
+    autoEstimateStarted.current = true;
+    void runEstimate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, busy, regions.length, costs?.lines?.length, loadError]);
+
+  useEffect(() => {
+    if (step !== 5 || autoReportStarted.current || busy || loadError) return;
+    if (reports.length) {
+      autoReportStarted.current = true;
+      return;
+    }
+    autoReportStarted.current = true;
+    void makeReport({ auto: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, busy, reports.length, loadError]);
 
   function openShare() {
     setShareOpen(true);
@@ -723,7 +768,7 @@ export default function ProjectWorkspacePage() {
           title="Structure regions"
           description="Let AI outline walls, windows, balconies and more — then fine-tune any shape or draw your own."
           actions={
-            <button className="btn-primary" onClick={detect} disabled={busy || !primary}>
+            <button className="btn-primary" onClick={() => detect()} disabled={busy || !primary}>
               {busy && progress.startsWith("Detecting") ? <Spinner /> : <Icon name="wand" />}
               {regions.length ? "Re-detect with AI" : "Detect with AI"}
             </button>
@@ -732,7 +777,11 @@ export default function ProjectWorkspacePage() {
           {primary ? (
             <>
               {regions.length === 0 && (
-                <Alert tone="info">No regions yet. Click “Detect with AI” (SegFormer masks). Requires HF_TOKEN on the backend — or draw regions manually.</Alert>
+                <Alert tone="info">
+                  {busy && progress.startsWith("Detecting")
+                    ? "Detecting structure regions… hang tight."
+                    : "Detection starts automatically on this step. You can also re-run AI or draw regions manually."}
+                </Alert>
               )}
               <RegionCanvas projectId={projectId} imageId={primary.id} regions={regions} onChange={setRegions} />
             </>
@@ -966,7 +1015,9 @@ export default function ProjectWorkspacePage() {
               ) : (
                 <div className="flex h-64 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-6 text-center text-sm text-slate-500">
                   <Icon name="sparkles" className="h-6 w-6 text-slate-400" />
-                  Your redesign will appear here once generated.
+                  {busy && progress.startsWith("Generating")
+                    ? "Generating redesign from your photo…"
+                    : "Redesign starts automatically when you open this step (if materials are saved)."}
                 </div>
               )}
             </figure>
@@ -1211,7 +1262,7 @@ export default function ProjectWorkspacePage() {
                 </p>
               </div>
             </div>
-            <button className="btn-primary shrink-0" onClick={makeReport} disabled={busy}>
+            <button className="btn-primary shrink-0" onClick={() => makeReport()} disabled={busy}>
               {busy && progress.startsWith("Generating PDF") ? <Spinner /> : <Icon name="download" />}
               Generate & download PDF
             </button>
