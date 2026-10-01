@@ -4,6 +4,7 @@ import logging
 
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import ProjectImage, RegionType, StructureRegion, User
 from app.schemas import DetectRegionsResponse, RegionCreate, RegionOut, RegionUpdate
@@ -83,6 +84,13 @@ async def detect_regions(
     message = f"{nice} detected {len(created)} regions"
     if len(used) > 1:
         message += f" (pipeline: {used_nice})"
+    gemini_note = (meta or {}).get("gemini_note")
+    if engine == "opencv" and gemini_note:
+        # Keep toast readable; full reason already in gemini_note
+        short = gemini_note if len(gemini_note) <= 160 else gemini_note[:157] + "…"
+        message += f" — {short}"
+    elif engine == "opencv" and not (get_settings().gemini_api_key or "").strip():
+        message += " — set GEMINI_API_KEY (AI Studio AIza… key) on the server"
     message += ". Drag handles to fine-tune."
 
     return DetectRegionsResponse(

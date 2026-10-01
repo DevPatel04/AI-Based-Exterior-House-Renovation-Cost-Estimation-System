@@ -159,43 +159,7 @@ def _pretty_detect_label(rtype: str) -> str:
     return defaults.get(rtype, rtype.replace("_", " ").title())
 
 
-def _detect_gemini_sync(image_path: Path) -> list[dict]:
-    settings = get_settings()
-    key = (settings.gemini_api_key or "").strip()
-    if not key:
-        raise StructureDetectError("GEMINI_API_KEY is not set for Gemini structure detect.")
-    if not getattr(settings, "enable_gemini_detect", True):
-        raise StructureDetectError("ENABLE_GEMINI_DETECT is false.")
-
-    model_name = (settings.gemini_detect_model or "gemini-2.5-pro").strip()
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config={
-                "temperature": 0.1,
-                "response_mime_type": "application/json",
-            },
-        )
-        uploaded = genai.upload_file(str(image_path))
-        result = model.generate_content([uploaded, _DETECT_PROMPT])
-        text = (result.text or "").strip()
-        data = _extract_json(text)
-    except Exception as exc:
-        # Retry without response_mime_type (some models reject it)
-        try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel(model_name, generation_config={"temperature": 0.1})
-            uploaded = genai.upload_file(str(image_path))
-            result = model.generate_content([uploaded, _DETECT_PROMPT])
-            data = _extract_json((result.text or "").strip())
-        except Exception as exc2:
-            raise StructureDetectError(f"Gemini detect failed ({model_name}): {exc2}") from exc2
-
+def _parse_gemini_detect_payload(data) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("regions") or data.get("detections") or data.get("items") or []
     if not isinstance(data, list):
@@ -229,11 +193,149 @@ def _detect_gemini_sync(image_path: Path) -> list[dict]:
                 "source": "gemini_detect",
             }
         )
-
     if not regions:
         raise StructureDetectError("Gemini detect returned no facade regions.")
-    logger.info("DETECT gemini model=%s regions=%s", model_name, len(regions))
     return regions
+
+
+def _gemini_key_invalid_message(resp_text: str = "") -> str | None:
+    """Return a user-facing message if Google rejected the API key."""
+    low = (resp_text or "").lower()
+    if "api_key_invalid" in low or "api key not valid" in low or "api key invalid" in low:
+        return (
+            "GEMINI_API_KEY invalid — create a Generative Language API key at "
+            "https://aistudio.google.com/apikey (usually starts with AIza…) "
+            "and set it on Railway"
+        )
+    if "api_key_service_blocked" in low or "permission_denied" in low and "api key" in low:
+        return "GEMINI_API_KEY blocked or missing Generative Language API access"
+    return None
+
+
+def _detect_gemini_sync(image_path: Path) -> list[dict]:
+    """Gemini vision structure boxes via REST (inline image + JSON)."""
+    import base64
+    import io
+
+    import httpx
+    from PIL import Image
+
+    settings = get_settings()
+    key = (settings.gemini_api_key or "").strip()
+    if not key:
+        raise StructureDetectError(
+            "GEMINI_API_KEY is not set. Add a paid Gemini API key for structure detect."
+        )
+    if not getattr(settings, "enable_gemini_detect", True):
+        raise StructureDetectError("ENABLE_GEMINI_DETECT is false.")
+    # Classic AI Studio keys are AIza…; other prefixes often fail on generativelanguage.googleapis.com
+    if key.startswith("AQ.") or (len(key) < 20):
+        logger.warning(
+            "DETECT GEMINI_API_KEY looks non-standard (prefix=%s…) — "
+            "use an AI Studio Generative Language key (AIza…)",
+            key[:4],
+        )
+
+    # Prefer widely available Flash vision models; Pro as optional upgrade
+    configured = (settings.gemini_detect_model or "gemini-2.5-flash").strip()
+    models: list[str] = []
+    for m in (
+        configured,
+        "gemini-2.5-flash",
+        "gemini-3.8-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+    ):
+        if m and m not in models:
+            models.append(m)
+
+    try:
+        pil = Image.open(image_path).convert("RGB")
+        pil.thumbnail((1280, 1280))
+        buf = io.BytesIO()
+        pil.save(buf, format="JPEG", quality=90)
+        image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        raise StructureDetectError(f"Could not read image for Gemini detect: {exc}") from exc
+
+    errors: list[str] = []
+    with httpx.Client(timeout=90.0) as client:
+        for model_name in models:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model_name}:generateContent?key={key}"
+            )
+            payloads = [
+                {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                                {"text": _DETECT_PROMPT},
+                            ],
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "responseMimeType": "application/json",
+                    },
+                },
+                {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                                {"text": _DETECT_PROMPT},
+                            ]
+                        }
+                    ],
+                    "generationConfig": {"temperature": 0.1},
+                },
+            ]
+            for payload in payloads:
+                try:
+                    resp = client.post(url, json=payload)
+                except Exception as exc:
+                    errors.append(f"{model_name}: {exc}"[:160])
+                    continue
+                if resp.status_code >= 400:
+                    bad_key = _gemini_key_invalid_message(resp.text)
+                    if bad_key:
+                        raise StructureDetectError(bad_key)
+                    errors.append(f"{model_name}: HTTP {resp.status_code} {resp.text[:140]}")
+                    if resp.status_code in {401, 403, 404}:
+                        break
+                    continue
+                try:
+                    body = resp.json()
+                except Exception:
+                    errors.append(f"{model_name}: non-json")
+                    continue
+                # Extract text from candidates
+                text = ""
+                for cand in body.get("candidates") or []:
+                    for part in (cand.get("content") or {}).get("parts") or []:
+                        if isinstance(part.get("text"), str):
+                            text += part["text"]
+                if not text.strip():
+                    block = (body.get("promptFeedback") or {}).get("blockReason") or "empty"
+                    errors.append(f"{model_name}: no text ({block})")
+                    continue
+                try:
+                    data = _extract_json(text.strip())
+                    regions = _parse_gemini_detect_payload(data)
+                    logger.info("DETECT gemini model=%s regions=%s", model_name, len(regions))
+                    return regions
+                except Exception as parse_exc:
+                    errors.append(f"{model_name}: parse {parse_exc}"[:160])
+                    continue
+
+    joined = " | ".join(errors[:3]) if errors else "unknown error"
+    bad_key = _gemini_key_invalid_message(joined)
+    if bad_key:
+        raise StructureDetectError(bad_key)
+    raise StructureDetectError("Gemini detect failed: " + joined)
 
 
 async def detect_gemini_regions(image_path: Path) -> list[dict]:
@@ -264,12 +366,17 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
     last_err: Exception | None = None
     regions: list[dict] = []
     engines_used: list[str] = []
+    gemini_note: str | None = None
     has_gemini = bool((settings.gemini_api_key or "").strip()) and getattr(
         settings, "enable_gemini_detect", True
     )
     has_hf = bool((settings.hf_token or "").strip()) and settings.enable_segformer
     has_replicate = bool((settings.replicate_api_token or "").strip())
     min_openings = int(getattr(settings, "grounded_min_openings", 3) or 3)
+
+    if not (settings.gemini_api_key or "").strip():
+        gemini_note = "GEMINI_API_KEY not set"
+        logger.warning("DETECT %s — will fall back if Gemini required", gemini_note)
 
     if has_gemini:
         try:
@@ -291,11 +398,13 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
                 logger.warning("DETECT post-Gemini OpenCV enrich skipped: %s", enrich_exc)
         except StructureDetectError as exc:
             last_err = exc
+            gemini_note = str(exc)[:180]
             logger.error("Gemini detect failed: %s", exc)
         except Exception as exc:
             last_err = StructureDetectError(str(exc))
+            gemini_note = str(exc)[:180]
             logger.exception("Gemini detect crashed: %s", exc)
-    else:
+    elif getattr(settings, "enable_gemini_detect", True):
         logger.warning("DETECT GEMINI_API_KEY missing / detect disabled — skipping Gemini")
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
@@ -313,7 +422,8 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
             logger.error("SegFormer detect failed: %s", exc)
         except Exception as exc:
             last_err = last_err or StructureDetectError(str(exc))
-            logger.exception("SegFormer detect crashed: %s", exc)
+            # HF 410 Gone / DNS failures are common — don't dump full stack
+            logger.error("SegFormer detect crashed: %s", exc)
     elif not has_hf and not regions:
         logger.warning("DETECT HF_TOKEN missing — SegFormer skipped")
 
@@ -362,6 +472,7 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
             "primary": primary,
             "engines_used": engines_used,
             "region_count": len(regions),
+            "gemini_note": gemini_note,
         }
         logger.info("DETECT done primary=%s engines=%s count=%s", primary, engines_used, len(regions))
         return regions, meta
@@ -376,6 +487,7 @@ async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
                 "primary": "opencv",
                 "engines_used": engines_used,
                 "region_count": len(fallback),
+                "gemini_note": gemini_note or (str(last_err)[:180] if last_err else None),
             }
     except Exception as exc:
         logger.exception("OpenCV fallback failed: %s", exc)

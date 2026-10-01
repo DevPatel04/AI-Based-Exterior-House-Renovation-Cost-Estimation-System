@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     #   BEST: gemini-2.5-pro (structured boxes) or gemini-3.1-pro-preview
     #   OK:   gemini-3.8-flash / gemini-2.5-flash (faster, less accurate)
     # NOT for segmentation: *-image models, flash-lite, TTS/Live/Imagen
-    gemini_detect_model: str = "gemini-2.5-pro"
+    gemini_detect_model: str = "gemini-2.5-flash"
     enable_gemini_detect: bool = True
     enable_gemini_quality_notes: bool = False
 
