@@ -16,12 +16,13 @@ from app.schemas import (
     ReferenceMeasurements,
 )
 from app.services.estimation import calculate_quantities_and_costs, estimate_areas
+from app.services.storage import absolute_path
 
 router = APIRouter(prefix="/api/projects/{project_id}/estimation", tags=["estimation"])
 
 
 @router.post("/areas", response_model=list[AreaEstimateOut])
-def run_area_estimation(
+async def run_area_estimation(
     project_id: int,
     refs: ReferenceMeasurements | None = None,
     user: User = Depends(require_permission("project:edit")),
@@ -34,6 +35,17 @@ def run_area_estimation(
         .first()
     )
     refs = refs or ReferenceMeasurements()
+    depth_info = None
+    if image is not None:
+        from app.services.depth_scale import refine_facade_scale
+
+        depth_info = await refine_facade_scale(
+            absolute_path(image.file_path),
+            image_width=image.width_px,
+            image_height=image.height_px,
+            known_width_ft=refs.known_width_ft,
+            known_height_ft=refs.known_height_ft,
+        )
     return estimate_areas(
         db,
         project,
@@ -41,6 +53,7 @@ def run_area_estimation(
         image.height_px if image else None,
         known_width_ft=refs.known_width_ft,
         known_height_ft=refs.known_height_ft,
+        depth_info=depth_info,
     )
 
 

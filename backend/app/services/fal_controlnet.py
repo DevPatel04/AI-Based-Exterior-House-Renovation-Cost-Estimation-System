@@ -11,45 +11,15 @@ import io
 import uuid
 from pathlib import Path
 
-import cv2
 import httpx
-import numpy as np
 from PIL import Image
 
 from app.core.config import get_settings
+from app.services.image_control import canny_control_png_bytes, data_uri_png
 from app.services.storage import ensure_upload_dirs
 
 FAL_QUEUE_BASE = "https://queue.fal.run"
 FAL_RUN_BASE = "https://fal.run"
-
-
-def _canny_control_png_bytes(source_path: Path, max_side: int = 1024) -> bytes:
-    """Build a Canny edge map from the house photo for ControlNet."""
-    bgr = cv2.imread(str(source_path))
-    if bgr is None:
-        # Pillow fallback if OpenCV cannot decode (e.g. some WebP)
-        rgb = Image.open(source_path).convert("RGB")
-        bgr = cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
-
-    h, w = bgr.shape[:2]
-    scale = min(1.0, max_side / max(h, w))
-    if scale < 1.0:
-        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(gray, 80, 180)
-    # Soften slightly so ControlNet is not overly rigid
-    edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
-    edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-    ok, buf = cv2.imencode(".png", edges_rgb)
-    if not ok:
-        raise RuntimeError("Failed to encode Canny control image")
-    return buf.tobytes()
-
-
-def _data_uri_png(png_bytes: bytes) -> str:
-    return "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
 
 
 async def _download_image(url: str, client: httpx.AsyncClient) -> bytes | None:
@@ -78,11 +48,11 @@ async def generate_fal_controlnet_redesign(source_path: Path, prompt: str) -> st
 
     model = (settings.fal_controlnet_model or "fal-ai/fast-sdxl-controlnet-canny").strip()
     try:
-        control_png = _canny_control_png_bytes(source_path)
+        control_png = canny_control_png_bytes(source_path)
     except Exception:
         return None
 
-    control_uri = _data_uri_png(control_png)
+    control_uri = data_uri_png(control_png)
     negative = (
         "blurry, distorted geometry, warped windows, extra floors, people, text, watermark, "
         "cartoon, low quality, different building layout"

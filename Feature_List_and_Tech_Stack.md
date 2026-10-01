@@ -7,8 +7,9 @@
 **Stack decisions:**
 - Database: **PostgreSQL**
 - File storage: **Local disk**
-- Vision / analysis: **Google Gemini**
-- Redesign images: **Cloudflare Workers AI** + optional **fal.ai ControlNet** (structure-preserving) + optional Gemini HQ
+- Vision / analysis: **Google Gemini** + optional **SegFormer CMP** (HF Inference)
+- Redesign images: **Replicate ControlNet** (preferred) + optional **fal.ai ControlNet** + **Cloudflare Workers AI** + optional Gemini HQ
+- Area scale: polygon × facade refs + optional **Depth Anything V2** (HF / Replicate)
 - Backend: **FastAPI (Python)**
 - Frontend: **Next.js + TypeScript + Tailwind**
 - PDF reports: **ReportLab**
@@ -100,13 +101,13 @@ The system acts as a **pre-construction planning assistant** and must not requir
 
 | ID | Feature | Covers requirement | Third-party / tech |
 |----|---------|-------------------|--------------------|
-| D1 | Detect main walls | Structure identification | Gemini vision |
-| D2 | Detect windows | Structure identification | Gemini |
-| D3 | Detect balconies | Structure identification | Gemini |
-| D4 | Detect pillars/columns | Structure identification | Gemini |
-| D5 | Detect parapet walls | Structure identification | Gemini |
-| D6 | Detect gate areas | Structure identification | Gemini |
-| D7 | Detect roof edges | Structure identification | Gemini |
+| D1 | Detect main walls | Structure identification | SegFormer CMP → Gemini → Konva |
+| D2 | Detect windows | Structure identification | SegFormer / Gemini |
+| D3 | Detect balconies | Structure identification | SegFormer / Gemini |
+| D4 | Detect pillars/columns | Structure identification | SegFormer / Gemini |
+| D5 | Detect parapet walls | Structure identification | SegFormer / Gemini |
+| D6 | Detect gate areas | Structure identification | SegFormer / Gemini |
+| D7 | Detect roof edges | Structure identification | SegFormer / Gemini |
 | D8 | Create mapped surface representation (regions overlay) | Mapped representation | Custom + Konva / Fabric.js |
 | D9 | User reviews detected regions | Review regions | Frontend |
 | D10 | User adjusts / corrects regions (draw, resize, delete, relabel) | Adjust areas | Konva / Fabric.js |
@@ -154,7 +155,7 @@ The system acts as a **pre-construction planning assistant** and must not requir
 | G4 | Estimate railing length/area | Area estimation | Custom |
 | G5 | Estimate cladding area | Area estimation | Custom |
 | G6 | Use reference assumptions (standard door/window size) | Reference assumptions | Config defaults in DB |
-| G7 | Perspective / pixel-to-real scale estimation | Perspective estimation | Custom + optional Gemini hints |
+| G7 | Perspective / pixel-to-real scale estimation | Perspective estimation | Depth Anything V2 + facade refs |
 | G8 | Optional user input measurements (height, width, known reference) | User measurements | UI + DB |
 | G9 | Show confidence / “approximate” disclaimer | Advisory estimates | UX copy |
 | G10 | Contractor / Architect can override areas | Secondary users | Role permissions |
@@ -279,11 +280,11 @@ User login (role-based)
     → Create / open project
     → Upload exterior image(s) → save locally
     → Quality check (Gemini + OpenCV)
-    → Structure detection (Gemini) → user review / correct regions
+    → Structure detection (SegFormer CMP → Gemini) → user review / correct regions
     → Select materials per region (catalog from PostgreSQL)
-    → Generate redesign (Cloudflare Workers AI; optional Gemini HQ)
+    → Generate redesign (Replicate ControlNet → fal → Cloudflare; optional Gemini HQ)
     → Compare original vs redesigned
-    → Estimate areas → quantities → costs (editable rates)
+    → Estimate areas (Depth Anything + polygon) → quantities → costs (editable rates)
     → Save project
     → Download PDF report (ReportLab)
 ```

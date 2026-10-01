@@ -133,8 +133,25 @@ Include major walls, windows, balconies, pillars, parapet, gate, roof edges if v
 
 
 async def detect_structure_regions(image_path: Path) -> list[dict]:
-    """Use Gemini vision when configured; otherwise return editable default regions."""
-    return await run_in_threadpool(_detect_structure_regions_sync, image_path)
+    """
+    Detection order:
+      1) SegFormer CMP facade (HF Inference) — best geometric masks
+      2) Gemini vision polygons — when GEMINI_API_KEY is set
+      3) Editable DEFAULT_REGIONS fallback
+    """
+    from app.services.segformer import detect_segformer_regions
+
+    seg = await detect_segformer_regions(image_path)
+    if seg and len(seg) >= 2:
+        return seg
+
+    gemini = await run_in_threadpool(_detect_structure_regions_sync, image_path)
+    # Prefer Gemini over a weak single-region SegFormer result
+    if gemini and gemini is not DEFAULT_REGIONS:
+        return gemini
+    if seg:
+        return seg
+    return gemini or DEFAULT_REGIONS
 
 
 def build_redesign_prompt(material_summary: str) -> str:

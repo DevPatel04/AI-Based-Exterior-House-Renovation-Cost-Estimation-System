@@ -50,6 +50,21 @@ class Settings(BaseSettings):
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 28
 
+    # Replicate ControlNet (preferred when fal has no free credits)
+    replicate_api_token: str = ""
+    enable_replicate_controlnet: bool = True
+    replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
+    replicate_controlnet_scale: float = 0.65
+    replicate_controlnet_steps: int = 28
+    replicate_depth_model: str = "chenxwh/depth-anything-v2"
+
+    # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
+    hf_token: str = ""
+    enable_segformer: bool = True
+    segformer_model: str = "Xpitfire/segformer-finetuned-segments-cmp-facade"
+    enable_depth_scale: bool = True
+    depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
+
     default_door_width_ft: float = 3.0
     default_door_height_ft: float = 7.0
     default_window_width_ft: float = 4.0

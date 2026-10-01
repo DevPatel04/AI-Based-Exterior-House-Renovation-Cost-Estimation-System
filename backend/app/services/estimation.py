@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models import (
     AreaEstimate,
     CostLine,
@@ -14,6 +13,7 @@ from app.models import (
     RegionType,
     StructureRegion,
 )
+from app.services.depth_scale import DepthScaleInfo, region_depth_factor
 
 
 def _polygon_area_norm(points: list[dict]) -> float:
@@ -34,11 +34,19 @@ def estimate_areas(
     image_height: int | None,
     known_width_ft: float | None = None,
     known_height_ft: float | None = None,
+    depth_info: DepthScaleInfo | None = None,
 ) -> list[AreaEstimate]:
-    settings = get_settings()
-    # Scale: assume facade width ~ 30 ft if no user reference
-    facade_width_ft = known_width_ft or 30.0
-    facade_height_ft = known_height_ft or 22.0
+    if depth_info is not None:
+        facade_width_ft = depth_info.facade_width_ft
+        facade_height_ft = depth_info.facade_height_ft
+        base_method = f"polygon_norm_x_{depth_info.method}"
+        base_conf_boost = depth_info.confidence
+    else:
+        # Scale: assume facade width ~ 30 ft if no user reference
+        facade_width_ft = known_width_ft or 30.0
+        facade_height_ft = known_height_ft or 22.0
+        base_method = "polygon_norm_x_reference_facade"
+        base_conf_boost = 0.5
 
     db.query(AreaEstimate).filter(
         AreaEstimate.project_id == project.id, AreaEstimate.user_override.is_(False)
@@ -53,17 +61,26 @@ def estimate_areas(
         .all()
         if a.region_id is not None
     }
+    depth_map = depth_info.depth_map if depth_info else None
     for region in project.regions:
         if region.id in override_region_ids:
             continue
         norm_area = _polygon_area_norm(region.points or [])
-        area_sq_ft = norm_area * facade_width_ft * facade_height_ft
+        depth_factor = region_depth_factor(depth_map, region.points or [])
+        area_sq_ft = norm_area * facade_width_ft * facade_height_ft * depth_factor
         length_ft = None
+        method = base_method
+        if depth_factor != 1.0:
+            method = f"{base_method}+depth_foreshorten"
         if region.region_type in {RegionType.railing, RegionType.roof_edge, RegionType.gate}:
             xs = [p["x"] for p in region.points]
             length_ft = (max(xs) - min(xs)) * facade_width_ft if xs else 0.0
             if region.region_type == RegionType.railing:
                 area_sq_ft = length_ft * 3.0  # assume 3 ft railing height
+
+        conf = float(region.confidence or 0.5)
+        if depth_info is not None:
+            conf = min(0.95, (conf + base_conf_boost) / 2.0)
 
         est = AreaEstimate(
             project_id=project.id,
@@ -71,8 +88,8 @@ def estimate_areas(
             region_type=region.region_type,
             area_sq_ft=round(area_sq_ft, 2),
             length_ft=round(length_ft, 2) if length_ft is not None else None,
-            method="polygon_norm_x_reference_facade",
-            confidence=region.confidence or 0.5,
+            method=method,
+            confidence=conf,
             user_override=False,
         )
         db.add(est)

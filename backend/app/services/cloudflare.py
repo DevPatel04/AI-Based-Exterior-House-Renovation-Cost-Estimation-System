@@ -20,15 +20,23 @@ async def generate_redesign(
 
     Order:
       1) Gemini HQ (only when hq_mode + keys)
-      2) fal.ai ControlNet Canny (optional FAL_KEY — structure-preserving, no local GPU)
-      3) Cloudflare Workers AI img2img
-      4) Local PIL fallback
+      2) Replicate SDXL ControlNet (REPLICATE_API_TOKEN — free trial credits)
+      3) fal.ai ControlNet Canny (optional FAL_KEY)
+      4) Cloudflare Workers AI img2img
+      5) Local PIL fallback
     """
     settings = get_settings()
     if hq_mode and settings.enable_gemini_hq and settings.gemini_api_key:
         path = await _gemini_hq(source_path, prompt)
         if path:
             return path, "gemini_hq"
+
+    if settings.enable_replicate_controlnet and (settings.replicate_api_token or "").strip():
+        from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
+
+        path = await generate_replicate_controlnet_redesign(source_path, prompt)
+        if path:
+            return path, "replicate_controlnet"
 
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
