@@ -33,8 +33,10 @@ async def generate_redesign(
     assignments: list | None = None,
 ) -> tuple[str, str, list[str]]:
     """
-    Cloudflare Workers AI only (SDXL Lightning).
-    Blends result onto the original photo so geometry stays real.
+    Cloudflare Workers AI only.
+
+    Never returns a half-blended “ghost” of an invented building on top of the photo.
+    CF output must match the source layout; otherwise we paint materials on the real photo.
     """
     from app.services.material_regions import (
         RegionMaterialAssignment,
@@ -60,14 +62,6 @@ async def generate_redesign(
         has_cf,
     )
 
-    # Subtle material guide (optional conditioning) — never returned as final image
-    material_guide_path: Path | None = None
-    if region_assignments:
-        guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.35)
-        if guide_rel:
-            material_guide_path = abs_upload(guide_rel)
-            notes.append(f"material_guide: {len(region_assignments)} regions")
-
     if not has_cf:
         notes.append(
             "cloudflare: set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
@@ -75,21 +69,55 @@ async def generate_redesign(
         )
         raise RedesignUnavailableError(notes)
 
+    # Soft material guide for conditioning only (never shown as final)
+    material_guide_path: Path | None = None
+    if region_assignments:
+        guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.28)
+        if guide_rel:
+            material_guide_path = abs_upload(guide_rel)
+            notes.append(f"material_guide: {len(region_assignments)} regions")
+
     logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
-    # Prefer real photo as input (guide invents flat boxes); use guide only as soft blend target later
     path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
     if not path and material_guide_path is not None:
         notes.append(f"cloudflare photo-pass: {cf_err or 'failed'}")
         path, cf_err = await _cloudflare_img2img(material_guide_path, prompt, hq_mode=hq_mode)
-    if path:
-        # Keep original house geometry; mix in CF materials
-        path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.42 if hq_mode else 0.36)
-        if region_assignments:
-            path = mask_ai_to_regions(source_path, path, region_assignments, ai_weight=0.7)
-        logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-        return path, "cloudflare", notes
 
-    notes.append(f"cloudflare: {cf_err or 'request failed'}")
+    if path:
+        sim = _layout_similarity(source_path, path)
+        notes.append(f"cf_layout_similarity={sim:.2f}")
+        # Lightning often ignores the photo and invents a stock house (watermarks) —
+        # blending that onto the original creates the double-exposure you saw.
+        if sim < 0.58:
+            notes.append(
+                "cloudflare rejected: output does not match source layout "
+                "(txt2img/invented building) — not blending to avoid ghosting"
+            )
+            logger.warning("REDESIGN discard mismatched CF output sim=%.2f", sim)
+            path = None
+        else:
+            # Keep the real photo outside regions; mix CF only inside assigned parts
+            if region_assignments:
+                path = mask_ai_to_regions(
+                    source_path, path, region_assignments, ai_weight=0.85 if hq_mode else 0.75
+                )
+            else:
+                # No regions: light mix only when layout already matches
+                path = _blend_ai_file_onto_photo(
+                    source_path, path, ai_weight=0.55 if hq_mode else 0.45
+                )
+            logger.info("REDESIGN ok engine=cloudflare path=%s sim=%.2f", path, sim)
+            return path, "cloudflare", notes
+
+    # CF invented a different scene or failed — paint selected materials on the REAL photo
+    if region_assignments:
+        painted = apply_region_materials(source_path, region_assignments, opacity=0.62)
+        if painted:
+            notes.append(f"cloudflare: {cf_err or 'layout mismatch'}; used region materials on photo")
+            logger.info("REDESIGN ok engine=cloudflare (region paint) path=%s", painted)
+            return painted, "cloudflare", notes
+
+    notes.append(f"cloudflare: {cf_err or 'request failed / layout mismatch'}")
     logger.error("REDESIGN cloudflare failed notes=%s", notes)
     raise RedesignUnavailableError(notes)
 
@@ -102,16 +130,53 @@ class RedesignUnavailableError(Exception):
         super().__init__("; ".join(notes) if notes else "No redesign engine available")
 
 
+def _layout_similarity(source_path: Path, ai_rel: str) -> float:
+    """
+    Rough 0..1 score: how much the AI image shares the source photo’s layout.
+    Low score ⇒ CF invented a different building (ghosting if blended).
+    """
+    try:
+        import numpy as np
+
+        root = ensure_upload_dirs()
+        ai_path = root / ai_rel if not Path(ai_rel).is_absolute() else Path(ai_rel)
+        if not ai_path.exists():
+            return 0.0
+        src = Image.open(source_path).convert("L")
+        ai = Image.open(ai_path).convert("L")
+        # Collage / stacked outputs are always wrong
+        if ai.height >= int(src.height * 1.45) or ai.width >= int(src.width * 1.45):
+            return 0.15
+        size = (96, 96)
+        a = np.asarray(src.resize(size, Image.Resampling.BILINEAR), dtype=np.float32)
+        b = np.asarray(ai.resize(size, Image.Resampling.BILINEAR), dtype=np.float32)
+        mae = float(np.mean(np.abs(a - b))) / 255.0
+        # Edge overlap (structure)
+        ae = np.asarray(
+            src.resize(size).filter(ImageFilter.FIND_EDGES), dtype=np.float32
+        )
+        be = np.asarray(
+            ai.resize(size).filter(ImageFilter.FIND_EDGES), dtype=np.float32
+        )
+        ae = ae > 20
+        be = be > 20
+        inter = float(np.logical_and(ae, be).sum())
+        union = float(np.logical_or(ae, be).sum()) or 1.0
+        edge_iou = inter / union
+        return max(0.0, min(1.0, (1.0 - mae) * 0.55 + edge_iou * 0.45))
+    except Exception as exc:
+        logger.warning("REDESIGN layout_similarity failed: %s", exc)
+        return 0.0
+
+
 def _blend_ai_onto_photo(source_path: Path, ai_image: Image.Image, ai_weight: float = 0.4) -> Image.Image:
     """Keep real-photo geometry; mix in AI material changes lightly."""
     src = Image.open(source_path).convert("RGB")
     ai = ai_image.convert("RGB").resize(src.size, Image.Resampling.LANCZOS)
-    # If AI returned a stacked/grid collage, take the top half (common CF quirk)
     if ai.height >= int(src.height * 1.6):
         ai = ai.crop((0, 0, ai.width, ai.height // 2)).resize(src.size, Image.Resampling.LANCZOS)
     w = float(max(0.15, min(0.75, ai_weight)))
     blended = Image.blend(src, ai, w)
-    # Preserve sharp edges from the original photo
     edges = src.filter(ImageFilter.FIND_EDGES).convert("L")
     edges = ImageOps.autocontrast(edges).point(lambda p: 255 if p > 28 else 0)
     return Image.composite(src, blended, edges)
@@ -228,7 +293,10 @@ def _photoreal_photo_edit(source_path: Path, prompt: str) -> str | None:
 async def _cloudflare_img2img(
     source_path: Path, prompt: str, hq_mode: bool = False
 ) -> tuple[str | None, str | None]:
-    """Cloudflare Workers AI — prefer image-conditioned calls; still cartoon-prone."""
+    """
+    Cloudflare Workers AI — image-conditioned only.
+    Never use plain txt2img: it invents a new house (watermarks) that ghosts when blended.
+    """
     settings = get_settings()
     configured = (settings.cloudflare_image_model or _DEFAULT_CF_MODEL).strip()
     account = (settings.cloudflare_account_id or "").strip()
@@ -236,14 +304,15 @@ async def _cloudflare_img2img(
     if not account or not token:
         return None, "CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN empty"
 
+    # Prefer configured Lightning, then true img2img model when available on the account
     models: list[str] = []
-    for m in (configured,):
-        if not m or "runwayml" in m.lower():
-            continue
-        if m not in models:
+    for m in (
+        configured,
+        _DEFAULT_CF_MODEL,
+        "@cf/runwayml/stable-diffusion-v1-5-img2img",
+    ):
+        if m and m not in models:
             models.append(m)
-    if not models:
-        models = [_DEFAULT_CF_MODEL]
 
     try:
         img = Image.open(source_path).convert("RGB")
@@ -256,35 +325,44 @@ async def _cloudflare_img2img(
         image_b64 = base64.b64encode(buf.getvalue()).decode()
 
         num_steps = 8 if hq_mode else 6
+        strength = 0.42 if hq_mode else 0.32
         photo_prompt = (
             f"{prompt} "
             "Photorealistic edit of THIS exact house photo — same architecture and camera. "
-            "Only change facade materials. Not a cartoon, not a new building."
+            "Only change facade materials. Not a cartoon, not a new building, no watermark, no text."
         )
+        neg = _CARTOON_NEGATIVE + ", alamy, shutterstock, getty, stock photo watermark, logo"
 
-        # Prefer image-conditioned; txt2img last (and caller blends onto photo)
+        # Multiple img2img schemas (Workers AI models differ). NO txt2img.
         payloads = [
             {
                 "prompt": photo_prompt,
-                "negative_prompt": _CARTOON_NEGATIVE,
+                "negative_prompt": neg,
                 "image_b64": image_b64,
-                "strength": 0.35 if hq_mode else 0.28,
+                "strength": strength,
                 "num_steps": num_steps,
-                "guidance": 5.5,
+                "guidance": 5.0,
             },
             {
                 "prompt": photo_prompt,
-                "negative_prompt": _CARTOON_NEGATIVE,
+                "negative_prompt": neg,
+                "image": image_b64,
+                "strength": strength,
                 "num_steps": num_steps,
-                "guidance": 5.5,
-                "width": img.size[0],
-                "height": img.size[1],
+                "guidance": 5.0,
+            },
+            {
+                "prompt": photo_prompt,
+                "negative_prompt": neg,
+                "init_image": image_b64,
+                "strength": strength,
+                "num_steps": num_steps,
             },
         ]
 
         headers = {"Authorization": f"Bearer {token}"}
         logger.info(
-            "REDESIGN cloudflare_call models=%s size=%sx%s steps=%s",
+            "REDESIGN cloudflare_call models=%s size=%sx%s steps=%s (img2img only)",
             models,
             img.size[0],
             img.size[1],
@@ -294,50 +372,48 @@ async def _cloudflare_img2img(
         async with httpx.AsyncClient(timeout=90.0) as client:
             for try_model in models:
                 try_url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{try_model}"
-                for i, payload in enumerate(payloads):
-                    mode = "img2img" if "image_b64" in payload else "txt2img"
+                for payload in payloads:
+                    label = f"model={try_model} mode=img2img"
                     resp = await client.post(try_url, headers=headers, json=payload)
-                    label = f"model={try_model} mode={mode}"
                     if resp.status_code >= 400:
                         err = f"HTTP {resp.status_code} {label}: {resp.text[:140]}"
                         logger.warning("REDESIGN cloudflare %s", err)
                         errors.append(err)
                         if resp.status_code == 403 and "not allowed" in resp.text.lower():
-                            break
+                            break  # next model
                         continue
 
                     content_type = resp.headers.get("content-type", "")
                     root = ensure_upload_dirs()
                     name = f"{uuid.uuid4().hex}.png"
                     dest = root / "redesigns" / name
-                    if "image" in content_type:
-                        dest.write_bytes(resp.content)
-                        logger.info("REDESIGN cloudflare ok %s", label)
-                        return f"redesigns/{name}", None
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        errors.append(f"non-json {label}")
-                        continue
-                    if data.get("success") is False:
-                        errors.append(f"API error {label}: {str(data.get('errors') or data)[:140]}")
-                        continue
-                    result = data.get("result")
                     raw: bytes | None = None
-                    if isinstance(result, str):
-                        raw = base64.b64decode(result)
-                    elif isinstance(result, dict):
-                        for key in ("image", "image_b64", "b64_json"):
-                            if key in result and isinstance(result[key], str):
-                                val = result[key]
-                                raw = base64.b64decode(val.split(",", 1)[-1] if "," in val else val)
-                                break
+                    if "image" in content_type:
+                        raw = resp.content
+                    else:
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            errors.append(f"non-json {label}")
+                            continue
+                        if data.get("success") is False:
+                            errors.append(f"API error {label}: {str(data.get('errors') or data)[:140]}")
+                            continue
+                        result = data.get("result")
+                        if isinstance(result, str):
+                            raw = base64.b64decode(result)
+                        elif isinstance(result, dict):
+                            for key in ("image", "image_b64", "b64_json"):
+                                if key in result and isinstance(result[key], str):
+                                    val = result[key]
+                                    raw = base64.b64decode(val.split(",", 1)[-1] if "," in val else val)
+                                    break
                     if raw:
                         dest.write_bytes(raw)
                         logger.info("REDESIGN cloudflare ok %s", label)
                         return f"redesigns/{name}", None
                     errors.append(f"no image bytes {label}")
-            return None, " | ".join(errors[:3]) if errors else "request failed"
+            return None, " | ".join(errors[:3]) if errors else "img2img unavailable (no txt2img fallback)"
     except Exception as exc:
         logger.warning("REDESIGN cloudflare exception: %s", exc)
         return None, str(exc)[:180]
