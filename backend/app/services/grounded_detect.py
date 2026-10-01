@@ -50,7 +50,7 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=120",
+        "Prefer": "wait=60",
     }
     payload = {
         "input": {

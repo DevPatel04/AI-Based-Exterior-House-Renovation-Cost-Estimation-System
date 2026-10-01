@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     cloudflare_image_model: str = "@cf/runwayml/stable-diffusion-v1-5-img2img"
 
     # Optional Hugging Face image-to-image (uses HF_TOKEN free monthly credits)
-    enable_hf_img2img: bool = True
-    hf_img2img_model: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    enable_hf_img2img: bool = False
+    hf_img2img_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
 
     # Optional fal.ai ControlNet (cloud GPU — no local GPU required)
     fal_key: str = ""

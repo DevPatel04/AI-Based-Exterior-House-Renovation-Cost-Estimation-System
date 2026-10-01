@@ -48,12 +48,12 @@ async def generate_redesign(
     # 1) Cloudflare — primary free path
     if settings.cloudflare_account_id and settings.cloudflare_api_token:
         logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
-        path = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
+        path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
         if path:
             logger.info("REDESIGN ok engine=cloudflare path=%s", path)
             return path, "cloudflare", notes
-        notes.append("cloudflare: request failed")
-        logger.warning("REDESIGN fail cloudflare")
+        notes.append(f"cloudflare: {cf_err or 'request failed'}")
+        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
     else:
         notes.append(
             "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
@@ -129,22 +129,23 @@ class RedesignUnavailableError(Exception):
         super().__init__("; ".join(notes) if notes else "No redesign engine available")
 
 
-async def _cloudflare_img2img(source_path: Path, prompt: str, hq_mode: bool = False) -> str | None:
+async def _cloudflare_img2img(
+    source_path: Path, prompt: str, hq_mode: bool = False
+) -> tuple[str | None, str | None]:
     """Cloudflare Workers AI — free daily Neurons. Prefer dedicated img2img model."""
     settings = get_settings()
     model = (settings.cloudflare_image_model or _DEFAULT_CF_IMG2IMG).strip()
-    # If someone still has lightning (txt2img-oriented), prefer real img2img
     if "lightning" in model.lower() and "img2img" not in model.lower():
         model = _DEFAULT_CF_IMG2IMG
         logger.info("REDESIGN cloudflare using img2img model instead of lightning: %s", model)
 
-    url = (
-        f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}"
-        f"/ai/run/{model}"
-    )
+    account = (settings.cloudflare_account_id or "").strip()
+    token = (settings.cloudflare_api_token or "").strip()
+    if not account or not token:
+        return None, "CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN empty"
+
     try:
         img = Image.open(source_path).convert("RGB")
-        # SD 1.5 works best around 512; keep aspect
         img.thumbnail((768, 768))
         import io
 
@@ -152,9 +153,8 @@ async def _cloudflare_img2img(source_path: Path, prompt: str, hq_mode: bool = Fa
         img.save(buf, format="PNG")
         image_b64 = base64.b64encode(buf.getvalue()).decode()
 
-        # HQ = more steps / slightly stronger edit within free Neurons budget
         strength = 0.62 if hq_mode else 0.52
-        num_steps = 20 if hq_mode else 16
+        num_steps = min(20 if hq_mode else 16, 20)
         payload = {
             "prompt": prompt,
             "negative_prompt": (
@@ -166,7 +166,7 @@ async def _cloudflare_img2img(source_path: Path, prompt: str, hq_mode: bool = Fa
             "num_steps": num_steps,
             "guidance": 7.5,
         }
-        headers = {"Authorization": f"Bearer {settings.cloudflare_api_token}"}
+        headers = {"Authorization": f"Bearer {token}"}
         logger.info(
             "REDESIGN cloudflare_call model=%s strength=%s steps=%s size=%sx%s",
             model,
@@ -175,52 +175,41 @@ async def _cloudflare_img2img(source_path: Path, prompt: str, hq_mode: bool = Fa
             img.size[0],
             img.size[1],
         )
+        last_err: str | None = None
         async with httpx.AsyncClient(timeout=180.0) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code >= 400:
-                logger.warning(
-                    "REDESIGN cloudflare http=%s body=%s — retry lightning model",
-                    resp.status_code,
-                    resp.text[:200],
-                )
-                alt_model = "@cf/bytedance/stable-diffusion-xl-lightning"
-                if model != alt_model and resp.status_code in (400, 404):
-                    alt_url = (
-                        f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}"
-                        f"/ai/run/{alt_model}"
-                    )
-                    resp = await client.post(alt_url, headers=headers, json=payload)
-                    if resp.status_code >= 400:
-                        logger.warning(
-                            "REDESIGN cloudflare alt http=%s body=%s",
-                            resp.status_code,
-                            resp.text[:200],
-                        )
-                        return None
-                else:
-                    return None
-            content_type = resp.headers.get("content-type", "")
-            root = ensure_upload_dirs()
-            name = f"{uuid.uuid4().hex}.png"
-            dest = root / "redesigns" / name
-            if "image" in content_type:
-                dest.write_bytes(resp.content)
-            else:
+            for try_model in (model, "@cf/bytedance/stable-diffusion-xl-lightning"):
+                try_url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{try_model}"
+                resp = await client.post(try_url, headers=headers, json=payload)
+                if resp.status_code >= 400:
+                    last_err = f"HTTP {resp.status_code} model={try_model}: {resp.text[:160]}"
+                    logger.warning("REDESIGN cloudflare %s", last_err)
+                    continue
+                content_type = resp.headers.get("content-type", "")
+                root = ensure_upload_dirs()
+                name = f"{uuid.uuid4().hex}.png"
+                dest = root / "redesigns" / name
+                if "image" in content_type:
+                    dest.write_bytes(resp.content)
+                    return f"redesigns/{name}", None
                 data = resp.json()
+                if data.get("success") is False:
+                    last_err = f"API error model={try_model}: {str(data.get('errors') or data)[:160]}"
+                    continue
                 result = data.get("result")
                 if isinstance(result, str):
                     dest.write_bytes(base64.b64decode(result))
-                elif isinstance(result, dict) and "image" in result:
+                    return f"redesigns/{name}", None
+                if isinstance(result, dict) and "image" in result:
                     dest.write_bytes(base64.b64decode(result["image"]))
-                elif isinstance(result, dict) and "image_b64" in result:
+                    return f"redesigns/{name}", None
+                if isinstance(result, dict) and "image_b64" in result:
                     dest.write_bytes(base64.b64decode(result["image_b64"]))
-                else:
-                    logger.warning("REDESIGN cloudflare unexpected JSON keys=%s", list(data.keys())[:10])
-                    return None
-            return f"redesigns/{name}"
+                    return f"redesigns/{name}", None
+                last_err = f"unexpected JSON model={try_model} keys={list(data.keys())[:8]}"
+            return None, last_err or "request failed"
     except Exception as exc:
         logger.warning("REDESIGN cloudflare exception: %s", exc)
-        return None
+        return None, str(exc)[:180]
 
 
 async def _gemini_hq(source_path: Path, prompt: str) -> str | None:
