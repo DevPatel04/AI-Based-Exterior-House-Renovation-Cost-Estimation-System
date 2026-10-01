@@ -56,9 +56,13 @@ git push origin develop
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
 | `GEMINI_API_KEY`        | optional — **not required** for redesign                       |
 | `ENABLE_GEMINI_HQ`      | `false` (leave off unless you have Gemini image quota)         |
-| `CLOUDFLARE_ACCOUNT_ID` | **recommended free redesign** — Cloudflare account id          |
-| `CLOUDFLARE_API_TOKEN`  | **recommended free redesign** — Workers AI REST API token      |
-| `CLOUDFLARE_IMAGE_MODEL`| default `@cf/runwayml/stable-diffusion-v1-5-img2img`           |
+| `ENABLE_POLLINATIONS_NANOBANANA` | `true` — primary free redesign (Nano Banana via Pollinations) |
+| `POLLINATIONS_API_KEY` | **required for Pollinations** — free key from https://enter.pollinations.ai/keys (anonymous calls return 401) |
+| `POLLINATIONS_NANOBANANA_MODEL` | default `nanobanana` |
+| `CLOUDFLARE_ACCOUNT_ID` | **backup free redesign** — Cloudflare account id |
+| `CLOUDFLARE_API_TOKEN` | **backup free redesign** — Workers AI REST API token |
+| `CLOUDFLARE_IMAGE_MODEL` | default `@cf/bytedance/stable-diffusion-xl-lightning` |
+| `ENABLE_CLOUDFLARE_REDESIGN` | `true` |
 | `HF_TOKEN`              | **required for Detect** — also optional redesign backup        |
 | `ENABLE_HF_IMG2IMG`     | `true` — uses HF free monthly credits as redesign backup       |
 | `ENABLE_SEGFORMER`      | `true`                                                         |

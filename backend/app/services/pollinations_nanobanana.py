@@ -1,19 +1,17 @@
-"""Pollinations Nano Banana — free image edit with a reference photo.
+"""Pollinations Nano Banana — image edit with a reference photo.
 
-Uses the Nano Banana family via Pollinations (optional API key; works anonymously
-when the edits endpoint allows it). Falls back to a short-lived public image URL
-+ GET /image when multipart is blocked.
-
-Docs: https://gen.pollinations.ai/docs
+`gen.pollinations.ai` now requires an API key (free keys: https://enter.pollinations.ai/keys).
+Set POLLINATIONS_API_KEY in the backend env. Without a key, this engine returns a clear error
+so Cloudflare / region materials can take over.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import logging
 import uuid
 from pathlib import Path
-from urllib.parse import quote
 
 import httpx
 from PIL import Image
@@ -25,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 _EDITS_URL = "https://gen.pollinations.ai/v1/images/edits"
 _GET_IMAGE_URL = "https://gen.pollinations.ai/image"
-_LEGACY_IMAGE_URL = "https://image.pollinations.ai/prompt"
 
 
 def _jpeg_bytes(path: Path, max_edge: int = 1280) -> bytes:
@@ -41,25 +38,6 @@ def _auth_headers(token: str | None) -> dict[str, str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
-
-
-async def _upload_temp_public(raw: bytes, client: httpx.AsyncClient) -> str | None:
-    """Short-lived public URL so Pollinations GET can use image=… (no Pollinations key)."""
-    # catbox.moe — free anonymous file host
-    try:
-        resp = await client.post(
-            "https://catbox.moe/user/api.php",
-            data={"reqtype": "fileupload"},
-            files={"fileToUpload": ("house.jpg", raw, "image/jpeg")},
-            timeout=60.0,
-        )
-        url = (resp.text or "").strip()
-        if resp.status_code < 400 and url.startswith("http"):
-            return url
-        logger.warning("REDESIGN pollinations catbox fail status=%s body=%s", resp.status_code, url[:120])
-    except Exception as exc:
-        logger.warning("REDESIGN pollinations catbox exception: %s", exc)
-    return None
 
 
 async def _save_image_bytes(raw: bytes) -> str | None:
@@ -94,9 +72,17 @@ async def generate_pollinations_nanobanana_redesign(
 
     model = (settings.pollinations_nanobanana_model or "nanobanana").strip()
     token = (settings.pollinations_api_key or "").strip() or None
+    if not token:
+        return (
+            None,
+            "POLLINATIONS_API_KEY missing — gen.pollinations.ai now requires a free key "
+            "from https://enter.pollinations.ai/keys (anonymous edits return 401)",
+        )
+
     ref = guide_path if guide_path and guide_path.exists() else source_path
     try:
         jpeg = _jpeg_bytes(ref, max_edge=1536 if hq_mode else 1280)
+        source_jpeg = _jpeg_bytes(source_path, max_edge=1536 if hq_mode else 1280)
     except Exception as exc:
         return None, f"could not read image: {exc}"
 
@@ -110,100 +96,73 @@ async def generate_pollinations_nanobanana_redesign(
     errors: list[str] = []
 
     async with httpx.AsyncClient(timeout=180.0, follow_redirects=True) as client:
-        # 1) OpenAI-compatible edits (multipart) — best for reference photo
-        try:
-            logger.info("REDESIGN pollinations try edits model=%s auth=%s", model, bool(token))
-            files = {
-                "image": ("house.jpg", jpeg, "image/jpeg"),
-            }
-            data = {
-                "prompt": edit_prompt[:1800],
-                "model": model,
-                "size": f"{width}x{height}",
-                "response_format": "b64_json",
-            }
-            # Also send source photo if guide was used so model sees both
-            if guide_path and guide_path.exists() and guide_path != source_path:
-                try:
-                    files = [
-                        ("image", ("house.jpg", _jpeg_bytes(source_path, 1280), "image/jpeg")),
-                        ("image", ("materials.jpg", jpeg, "image/jpeg")),
-                    ]
-                    data["prompt"] = (
-                        edit_prompt[:1600]
-                        + " Image 1 = original house. Image 2 = materials mapped on regions — match those finishes."
-                    )
-                except Exception:
-                    pass
+        logger.info("REDESIGN pollinations try edits model=%s", model)
+        files: list[tuple[str, tuple]] = [
+            ("image", ("house.jpg", source_jpeg, "image/jpeg")),
+        ]
+        data = {
+            "prompt": edit_prompt[:1800],
+            "model": model,
+            "size": f"{width}x{height}",
+            "response_format": "b64_json",
+        }
+        if guide_path and guide_path.exists() and guide_path != source_path:
+            files.append(("image", ("materials.jpg", jpeg, "image/jpeg")))
+            data["prompt"] = (
+                edit_prompt[:1500]
+                + " Image 1 = original house. Image 2 = materials on each region — match those finishes."
+            )
 
+        try:
             resp = await client.post(
                 _EDITS_URL,
                 headers=_auth_headers(token),
                 data=data,
                 files=files,
             )
-            if resp.status_code < 400:
-                ctype = resp.headers.get("content-type", "")
-                if "image" in ctype:
-                    saved = await _save_image_bytes(resp.content)
-                    if saved:
-                        logger.info("REDESIGN pollinations ok via=edits_binary path=%s", saved)
-                        return saved, None
-                try:
-                    body = resp.json()
-                    b64 = None
-                    if isinstance(body, dict):
-                        data_list = body.get("data") or []
-                        if data_list and isinstance(data_list[0], dict):
-                            b64 = data_list[0].get("b64_json")
-                            url = data_list[0].get("url")
-                            if url and not b64:
-                                img_resp = await client.get(url, timeout=120.0)
-                                if img_resp.status_code < 400:
-                                    saved = await _save_image_bytes(img_resp.content)
-                                    if saved:
-                                        logger.info("REDESIGN pollinations ok via=edits_url path=%s", saved)
-                                        return saved, None
-                    if b64:
-                        import base64
-
-                        saved = await _save_image_bytes(base64.b64decode(b64))
-                        if saved:
-                            logger.info("REDESIGN pollinations ok via=edits_b64 path=%s", saved)
-                            return saved, None
-                except Exception as exc:
-                    errors.append(f"edits parse: {exc}")
-            else:
-                errors.append(f"edits HTTP {resp.status_code}: {resp.text[:160]}")
-                logger.warning("REDESIGN pollinations edits fail %s", errors[-1])
         except Exception as exc:
-            errors.append(f"edits exception: {exc}")
             logger.warning("REDESIGN pollinations edits exception: %s", exc)
+            return None, f"edits exception: {exc}"
 
-        # 2) Temp public URL + GET /image (works without key on many Pollinations deployments)
-        public_url = await _upload_temp_public(jpeg, client)
-        if public_url:
-            encoded = quote(edit_prompt[:900], safe="")
-            for base in (_GET_IMAGE_URL, _LEGACY_IMAGE_URL):
-                try:
-                    url = (
-                        f"{base}/{encoded}"
-                        f"?model={quote(model)}"
-                        f"&width={width}&height={height}"
-                        f"&nologo=true&enhance=false"
-                        f"&image={quote(public_url, safe='')}"
-                    )
-                    if token:
-                        url += f"&key={quote(token)}"
-                    logger.info("REDESIGN pollinations try GET base=%s", base)
-                    resp = await client.get(url, headers=_auth_headers(token), timeout=180.0)
-                    if resp.status_code < 400 and "image" in (resp.headers.get("content-type") or ""):
-                        saved = await _save_image_bytes(resp.content)
+        if resp.status_code in (401, 403):
+            err = (
+                f"HTTP {resp.status_code} invalid/expired POLLINATIONS_API_KEY — "
+                "get a free key at https://enter.pollinations.ai/keys"
+            )
+            logger.error("REDESIGN pollinations auth_fail %s", err)
+            return None, err
+        if resp.status_code >= 400:
+            err = f"edits HTTP {resp.status_code}: {resp.text[:180]}"
+            logger.warning("REDESIGN pollinations %s", err)
+            return None, err
+
+        ctype = resp.headers.get("content-type", "")
+        if "image" in ctype:
+            saved = await _save_image_bytes(resp.content)
+            if saved:
+                logger.info("REDESIGN pollinations ok via=edits_binary path=%s", saved)
+                return saved, None
+
+        try:
+            body = resp.json()
+            data_list = (body.get("data") or []) if isinstance(body, dict) else []
+            if data_list and isinstance(data_list[0], dict):
+                item = data_list[0]
+                if item.get("b64_json"):
+                    saved = await _save_image_bytes(base64.b64decode(item["b64_json"]))
+                    if saved:
+                        logger.info("REDESIGN pollinations ok via=edits_b64 path=%s", saved)
+                        return saved, None
+                url = item.get("url")
+                if url:
+                    img_resp = await client.get(url, timeout=120.0)
+                    if img_resp.status_code < 400:
+                        saved = await _save_image_bytes(img_resp.content)
                         if saved:
-                            logger.info("REDESIGN pollinations ok via=get path=%s", saved)
+                            logger.info("REDESIGN pollinations ok via=edits_url path=%s", saved)
                             return saved, None
-                    errors.append(f"GET {base} HTTP {resp.status_code}: {resp.text[:120]}")
-                except Exception as exc:
-                    errors.append(f"GET {base}: {exc}")
+            errors.append(f"unexpected edits JSON keys={list(body)[:8] if isinstance(body, dict) else type(body)}")
+        except Exception as exc:
+            errors.append(f"edits parse: {exc}")
 
     return None, " | ".join(errors[:3]) if errors else "pollinations nanobanana failed"

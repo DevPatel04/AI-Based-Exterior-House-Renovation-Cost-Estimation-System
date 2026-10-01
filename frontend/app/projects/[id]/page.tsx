@@ -939,7 +939,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Free redesign with Pollinations Nano Banana (reference photo), then Cloudflare Lightning if needed — applies materials on “${activeDesign.name}”.`
+              ? `Redesign with Pollinations Nano Banana (free key) then Cloudflare Lightning — materials on “${activeDesign.name}”.`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
