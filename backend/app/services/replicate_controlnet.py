@@ -72,17 +72,21 @@ async def generate_replicate_controlnet_redesign(
         return None, f"could not build control image: {exc}"
 
     negative = (
-        "blurry, distorted geometry, warped windows, extra floors, people, text, watermark, "
-        "cartoon, low quality, different building layout"
+        "blurry, distorted geometry, warped windows, melted glass, extra floors, "
+        "different building, invented architecture, people, text, watermark, "
+        "cartoon, illustration, CGI, 3d render, anime, oversaturated, plastic look, "
+        "low quality, fake textures"
     )
+    condition_scale = float(settings.replicate_controlnet_scale or 0.85)
+    steps = int(settings.replicate_controlnet_steps or 30)
     payload = {
         "input": {
             "prompt": prompt,
             "negative_prompt": negative,
             "image": control_uri,
-            "condition_scale": float(settings.replicate_controlnet_scale),
-            "num_inference_steps": int(settings.replicate_controlnet_steps),
-            "guidance_scale": 7.5,
+            "condition_scale": condition_scale,
+            "num_inference_steps": steps,
+            "guidance_scale": 6.5,
             "num_outputs": 1,
         }
     }
@@ -94,81 +98,94 @@ async def generate_replicate_controlnet_redesign(
 
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            logger.info("REDESIGN replicate_call start model=%s", model)
-            resp = await client.post(
-                f"https://api.replicate.com/v1/models/{model}/predictions",
-                headers=headers,
-                json=payload,
+            logger.info(
+                "REDESIGN replicate_call start model=%s condition_scale=%s steps=%s",
+                model,
+                condition_scale,
+                steps,
             )
-            if resp.status_code >= 400:
-                logger.warning(
-                    "REDESIGN replicate_call canny_rejected status=%s body=%s — retry original image",
-                    resp.status_code,
-                    resp.text[:200],
-                )
-                payload["input"]["image"] = source_uri
+            attempts = [("canny", control_uri), ("photo", source_uri)]
+            last_err: str | None = None
+            for attempt_name, image_uri in attempts:
+                payload["input"]["image"] = image_uri
                 resp = await client.post(
                     f"https://api.replicate.com/v1/models/{model}/predictions",
                     headers=headers,
                     json=payload,
                 )
-            if resp.status_code in (401, 403):
-                err = (
-                    f"HTTP {resp.status_code} invalid REPLICATE_API_TOKEN — "
-                    "set a valid token from https://replicate.com/account/api-tokens"
+                if resp.status_code in (401, 403):
+                    err = (
+                        f"HTTP {resp.status_code} invalid REPLICATE_API_TOKEN — "
+                        "set a valid token from https://replicate.com/account/api-tokens"
+                    )
+                    logger.error("REDESIGN replicate_call auth_fail %s", err)
+                    return None, err
+                if resp.status_code == 429:
+                    err = "HTTP 429 rate limit / no credits — check https://replicate.com/account"
+                    logger.error("REDESIGN replicate_call %s", err)
+                    return None, err
+                if resp.status_code >= 400:
+                    last_err = f"HTTP {resp.status_code} ({attempt_name}): {resp.text[:180]}"
+                    logger.warning("REDESIGN replicate_call %s", last_err)
+                    continue
+
+                data = resp.json()
+                output = data.get("output")
+                status = (data.get("status") or "").lower()
+                get_url = (data.get("urls") or {}).get("get")
+                pred_id = data.get("id")
+
+                if not output and get_url:
+                    import asyncio
+
+                    logger.info(
+                        "REDESIGN replicate_call polling id=%s status=%s attempt=%s",
+                        pred_id,
+                        status,
+                        attempt_name,
+                    )
+                    for _ in range(60):
+                        st = await client.get(get_url, headers={"Authorization": f"Bearer {token}"})
+                        if st.status_code >= 400:
+                            last_err = f"poll HTTP {st.status_code}"
+                            break
+                        body = st.json()
+                        status = (body.get("status") or "").lower()
+                        if status == "succeeded":
+                            output = body.get("output")
+                            break
+                        if status in {"failed", "canceled"}:
+                            last_err = f"prediction {status}: {(body.get('error') or '')[:160]}"
+                            break
+                        await asyncio.sleep(2.0)
+
+                if not output:
+                    last_err = last_err or f"no output ({attempt_name})"
+                    continue
+                img_url = output[0] if isinstance(output, list) else output
+                if not isinstance(img_url, str):
+                    last_err = f"unexpected output type: {type(output).__name__}"
+                    continue
+                raw = await _download_image(img_url, client)
+                if not raw:
+                    last_err = "could not download result image"
+                    continue
+
+                root = ensure_upload_dirs()
+                name = f"{uuid.uuid4().hex}.png"
+                dest = root / "redesigns" / name
+                try:
+                    Image.open(io.BytesIO(raw)).convert("RGB").save(dest, format="PNG")
+                except Exception:
+                    dest.write_bytes(raw)
+                logger.info(
+                    "REDESIGN replicate_call ok id=%s attempt=%s path=redesigns/%s",
+                    pred_id,
+                    attempt_name,
+                    name,
                 )
-                logger.error("REDESIGN replicate_call auth_fail %s", err)
-                return None, err
-            if resp.status_code == 429:
-                err = "HTTP 429 rate limit / no credits — check https://replicate.com/account"
-                logger.error("REDESIGN replicate_call %s", err)
-                return None, err
-            if resp.status_code >= 400:
-                err = f"HTTP {resp.status_code}: {resp.text[:180]}"
-                logger.warning("REDESIGN replicate_call http_error %s", err)
-                return None, err
-
-            data = resp.json()
-            output = data.get("output")
-            status = (data.get("status") or "").lower()
-            get_url = (data.get("urls") or {}).get("get")
-            pred_id = data.get("id")
-
-            if not output and get_url:
-                import asyncio
-
-                logger.info("REDESIGN replicate_call polling id=%s status=%s", pred_id, status)
-                for _ in range(60):
-                    st = await client.get(get_url, headers={"Authorization": f"Bearer {token}"})
-                    if st.status_code >= 400:
-                        return None, f"poll HTTP {st.status_code}"
-                    body = st.json()
-                    status = (body.get("status") or "").lower()
-                    if status == "succeeded":
-                        output = body.get("output")
-                        break
-                    if status in {"failed", "canceled"}:
-                        return None, f"prediction {status}: {(body.get('error') or '')[:160]}"
-                    await asyncio.sleep(2.0)
-
-            if not output:
-                return None, "no output from Replicate (timeout or empty)"
-            img_url = output[0] if isinstance(output, list) else output
-            if not isinstance(img_url, str):
-                return None, f"unexpected output type: {type(output).__name__}"
-            raw = await _download_image(img_url, client)
-            if not raw:
-                return None, "could not download result image"
-
-            root = ensure_upload_dirs()
-            name = f"{uuid.uuid4().hex}.png"
-            dest = root / "redesigns" / name
-            try:
-                Image.open(io.BytesIO(raw)).convert("RGB").save(dest, format="PNG")
-            except Exception:
-                dest.write_bytes(raw)
-            logger.info("REDESIGN replicate_call ok id=%s path=redesigns/%s", pred_id, name)
-            return f"redesigns/{name}", None
+                return f"redesigns/{name}", None
+            return None, last_err or "replicate failed"
     except Exception as exc:
         logger.exception("REDESIGN replicate_call exception")
         return None, str(exc)[:200]

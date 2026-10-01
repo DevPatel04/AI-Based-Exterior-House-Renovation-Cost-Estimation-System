@@ -873,7 +873,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Free path: Cloudflare Workers AI img2img (set CLOUDFLARE_* keys). Optional: Replicate ControlNet for stronger facade lock.`
+              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Prefers Replicate ControlNet (photorealistic facade lock). Cloudflare is only a fallback.`
               : "Generate a redesigned view of your house using your selected materials."
           }
           actions={

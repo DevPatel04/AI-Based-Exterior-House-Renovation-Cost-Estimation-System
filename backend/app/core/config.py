@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     replicate_api_token: str = ""
     enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
-    replicate_controlnet_scale: float = 0.65
-    replicate_controlnet_steps: int = 28
+    replicate_controlnet_scale: float = 0.85
+    replicate_controlnet_steps: int = 30
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
     # Green-overlay PIL preview when all AI engines fail (off by default — prefer a clear error)
     allow_local_redesign_fallback: bool = False

@@ -115,8 +115,10 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
 
 def build_redesign_prompt(material_summary: str) -> str:
     return (
-        "Photorealistic exterior renovation of this exact residential house. "
-        "Preserve building geometry, window/door positions, perspective, and camera angle. "
-        f"Apply these materials: {material_summary}. "
-        "Natural daylight, realistic textures, no text overlays, no people."
+        "Photorealistic DSLR photo of this exact same residential house exterior, "
+        "same camera angle, same roof silhouette, same window and door positions. "
+        "Only change surface materials/finishes — do not invent new architecture. "
+        f"Materials to apply: {material_summary}. "
+        "Natural daylight, real textures, sharp details, no CGI look, no illustration, "
+        "no people, no text, no watermark."
     )

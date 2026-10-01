@@ -25,10 +25,10 @@ async def generate_redesign(
     """
     Returns (relative_path, engine_used, failure_notes).
 
-    Free-first order (no Gemini required):
-      1) Cloudflare Workers AI (SDXL Lightning / DreamShaper)
-      2) Replicate SDXL ControlNet
-      3) fal.ai ControlNet
+    Quality-first order (photorealistic facade lock):
+      1) Replicate SDXL ControlNet (best — keeps real house structure)
+      2) fal.ai ControlNet
+      3) Cloudflare Workers AI (fallback — more “AI look”)
       4) Hugging Face image-to-image (optional)
       5) Gemini HQ only if explicitly enabled
       6) Local PIL fallback only if ALLOW_LOCAL_REDESIGN_FALLBACK=true
@@ -36,30 +36,17 @@ async def generate_redesign(
     settings = get_settings()
     notes: list[str] = []
     logger.info(
-        "REDESIGN begin hq=%s cloudflare=%s replicate=%s fal=%s hf=%s gemini_hq=%s local_ok=%s",
+        "REDESIGN begin hq=%s replicate=%s fal=%s cloudflare=%s hf=%s gemini_hq=%s local_ok=%s",
         hq_mode,
-        bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
         bool((settings.replicate_api_token or "").strip() and settings.enable_replicate_controlnet),
         bool((settings.fal_key or "").strip() and settings.enable_fal_controlnet),
+        bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
         bool((settings.hf_token or "").strip() and settings.enable_hf_img2img),
         bool(hq_mode and settings.enable_gemini_hq and settings.gemini_api_key),
         bool(settings.allow_local_redesign_fallback),
     )
 
-    if settings.cloudflare_account_id and settings.cloudflare_api_token:
-        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
-        path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
-        if path:
-            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-            return path, "cloudflare", notes
-        notes.append(f"cloudflare: {cf_err or 'request failed'}")
-        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
-    else:
-        notes.append(
-            "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
-            "(free: https://developers.cloudflare.com/workers-ai/get-started/rest-api/)"
-        )
-
+    # 1) Replicate ControlNet first — photorealistic, structure-preserving
     if settings.enable_replicate_controlnet and (settings.replicate_api_token or "").strip():
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
 
@@ -73,6 +60,7 @@ async def generate_redesign(
     else:
         notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
+    # 2) fal ControlNet
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
 
@@ -85,6 +73,21 @@ async def generate_redesign(
         logger.warning("REDESIGN fail fal_controlnet")
     else:
         notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
+
+    # 3) Cloudflare — free fallback (more generative / less faithful)
+    if settings.cloudflare_account_id and settings.cloudflare_api_token:
+        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+        path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
+        if path:
+            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
+            return path, "cloudflare", notes
+        notes.append(f"cloudflare: {cf_err or 'request failed'}")
+        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
+    else:
+        notes.append(
+            "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
+            "(free: https://developers.cloudflare.com/workers-ai/get-started/rest-api/)"
+        )
 
     if (settings.hf_token or "").strip() and settings.enable_hf_img2img:
         from app.services.hf_img2img import generate_hf_img2img_redesign
