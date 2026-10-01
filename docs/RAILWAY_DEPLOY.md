@@ -68,7 +68,8 @@ git push origin develop
 | `REPLICATE_API_TOKEN`   | optional — ControlNet redesign + Grounded-SAM detect backup    |
 | `ENABLE_REPLICATE_CONTROLNET` | `true` (preferred ControlNet path when token set)        |
 | `REPLICATE_CONTROLNET_MODEL` | default `lucataco/sdxl-controlnet`                          |
-| `REPLICATE_SEG_MODEL`   | default `schananas/grounded_sam` (detect backup)               |
+| `REPLICATE_SEG_MODEL`   | default `schananas/grounded_sam` (per-class masks when HF fails) |
+| `REPLICATE_DINO_MODEL`  | default `adirik/grounding-dino` (window/door boxes backup)      |
 | `FAL_KEY`               | optional — only if you have fal credits                        |
 | `ENABLE_FAL_CONTROLNET` | `true` (used when `FAL_KEY` is set; after Replicate)           |
 | `FAL_CONTROLNET_MODEL`  | default `fal-ai/fast-sdxl-controlnet-canny`                    |

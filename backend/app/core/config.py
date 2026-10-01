@@ -61,14 +61,15 @@ class Settings(BaseSettings):
     replicate_controlnet_scale: float = 0.65
     replicate_controlnet_steps: int = 28
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
+    replicate_seg_model: str = "schananas/grounded_sam"
+    replicate_dino_model: str = "adirik/grounding-dino"
 
-    # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
+    # Hugging Face Inference — SegFormer (preferred when Railway can resolve HF DNS)
     hf_token: str = ""
     enable_segformer: bool = True
     segformer_model: str = "nvidia/segformer-b0-finetuned-ade-512-512"
     enable_depth_scale: bool = True
     depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
-    replicate_seg_model: str = "schananas/grounded_sam"
 
     default_door_width_ft: float = 3.0
     default_door_height_ft: float = 7.0

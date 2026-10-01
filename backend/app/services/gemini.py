@@ -183,9 +183,9 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
     Model-only structure detection (no hardcoded region templates).
 
-      1) SegFormer masks (HF)
-      2) Grounded-SAM (Replicate) when parts are missing
-      3) Gemini vision detect only if ENABLE_GEMINI_REGION_DETECT=true
+      1) SegFormer masks via Hugging Face (best when HF DNS works)
+      2) Replicate Grounded-SAM per-class + Grounding-DINO (same accuracy goal when HF fails)
+      3) Gemini vision only if ENABLE_GEMINI_REGION_DETECT=true
       4) Gemini refine only if ENABLE_GEMINI_REGION_REFINE=true
     """
     import logging
@@ -202,24 +202,25 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             regions = await detect_segformer_regions(image_path)
         except StructureDetectError as exc:
             errors.append(str(exc))
-            logger.error("SegFormer detect failed: %s", exc)
+            logger.error("HF SegFormer detect failed: %s", exc)
         except Exception as exc:
             errors.append(str(exc))
-            logger.exception("SegFormer detect crashed: %s", exc)
+            logger.exception("HF SegFormer detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-    if non_wall < 2 and (settings.replicate_api_token or "").strip():
+    # Always use Replicate high-accuracy fallback when HF failed or only returned wall(s)
+    if (not regions or non_wall < 2) and (settings.replicate_api_token or "").strip():
         try:
             from app.services.grounded_detect import detect_grounded_regions
 
             grounded = await detect_grounded_regions(image_path)
-            regions = _merge_region_lists(regions, grounded)
+            regions = _merge_region_lists(regions, grounded) if regions else grounded
         except StructureDetectError as exc:
             errors.append(str(exc))
-            logger.error("Grounded-SAM detect failed: %s", exc)
+            logger.error("Replicate detect failed: %s", exc)
         except Exception as exc:
             errors.append(str(exc))
-            logger.exception("Grounded-SAM detect crashed: %s", exc)
+            logger.exception("Replicate detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     if (not regions or non_wall < 2) and settings.enable_gemini_region_detect:
@@ -233,12 +234,10 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
                 logger.exception("Gemini vision detect crashed: %s", exc)
 
     if not regions:
-        # Prefer the most actionable error (network / Replicate), then hint
         primary = errors[0] if errors else ""
         hint = (
-            "Detect needs outbound HTTPS to Hugging Face and/or Replicate. "
-            "Confirm HF_TOKEN and REPLICATE_API_TOKEN are on the backend service. "
-            "Or draw regions manually."
+            "Detect needs HF_TOKEN (SegFormer) and/or REPLICATE_API_TOKEN "
+            "(Grounded-SAM + Grounding-DINO fallback). Or draw regions manually."
         )
         if primary:
             raise StructureDetectError(f"{primary} — {hint}")

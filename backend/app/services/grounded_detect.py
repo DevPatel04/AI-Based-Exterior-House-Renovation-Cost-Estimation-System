@@ -1,4 +1,10 @@
-"""Replicate Grounded-SAM structure detection (backup when HF SegFormer fails)."""
+"""High-accuracy Replicate fallbacks when Hugging Face SegFormer is unreachable.
+
+1) schananas/grounded_sam — per-class mask_prompt (windows, doors, walls, …)
+2) adirik/grounding-dino — open-vocab boxes for openings if masks are thin
+
+Same polygon pipeline as SegFormer (mask/contour → Konva points).
+"""
 
 from __future__ import annotations
 
@@ -15,19 +21,116 @@ from PIL import Image
 
 from app.core.config import get_settings
 from app.models import RegionType
-from app.services.segformer import StructureDetectError, _format_network_error, _mask_to_regions
+from app.services.segformer import (
+    StructureDetectError,
+    _format_network_error,
+    _mask_to_regions,
+    _merge_region_lists,
+    _pretty_label,
+)
 
 logger = logging.getLogger(__name__)
 
-_PROMPT_MAP = [
-    ("main wall of the house facade", RegionType.main_wall.value, "Main wall"),
-    ("window", RegionType.window.value, "Window"),
-    ("door entrance", RegionType.gate.value, "Door / gate"),
-    ("balcony", RegionType.balcony.value, "Balcony"),
-    ("roof edge", RegionType.roof_edge.value, "Roof edge"),
-    ("railing", RegionType.railing.value, "Railing"),
-    ("pillar column", RegionType.pillar.value, "Pillar"),
+# One Grounded-SAM call per class → accurate part masks (not a single wall blob)
+_CLASS_PROMPTS: list[tuple[str, str]] = [
+    ("house facade wall, building wall", RegionType.main_wall.value),
+    ("window, window pane, glass window", RegionType.window.value),
+    ("door, entrance door, front door", RegionType.gate.value),
+    ("balcony, porch", RegionType.balcony.value),
+    ("roof edge, roofline, cornice", RegionType.roof_edge.value),
+    ("railing, fence rail", RegionType.railing.value),
+    ("pillar, column", RegionType.pillar.value),
 ]
+
+
+def _image_data_uri(image_path: Path, max_side: int = 1024) -> tuple[str, int, int]:
+    img = Image.open(image_path).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    w, h = img.size
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    return uri, w, h
+
+
+def _replicate_predict(
+    client: httpx.Client,
+    token: str,
+    model: str,
+    input_payload: dict,
+) -> dict | list | None:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Prefer": "wait=60",
+    }
+    try:
+        resp = client.post(
+            f"https://api.replicate.com/v1/models/{model}/predictions",
+            headers=headers,
+            json={"input": input_payload},
+        )
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+        raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
+
+    if resp.status_code >= 400:
+        logger.warning("Replicate %s → %s %s", model, resp.status_code, resp.text[:200])
+        return None
+
+    data = resp.json()
+    output = data.get("output")
+    get_url = (data.get("urls") or {}).get("get")
+    status = (data.get("status") or "").lower()
+
+    if not output and get_url and status not in {"succeeded", "failed", "canceled"}:
+        for _ in range(45):
+            time.sleep(2)
+            try:
+                st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+                raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
+            body = st.json()
+            status = (body.get("status") or "").lower()
+            if status == "succeeded":
+                return body.get("output")
+            if status in {"failed", "canceled"}:
+                return None
+        return None
+    return output
+
+
+def _masks_from_output(output) -> list[str]:
+    if output is None:
+        return []
+    if isinstance(output, str):
+        return [output]
+    if isinstance(output, list):
+        return [u for u in output if isinstance(u, str)]
+    if isinstance(output, dict):
+        for key in ("masks", "mask", "output", "annotated"):
+            val = output.get(key)
+            if isinstance(val, str):
+                return [val]
+            if isinstance(val, list):
+                return [u for u in val if isinstance(u, str)]
+    return []
+
+
+def _load_mask(url_or_data: str, width: int, height: int, client: httpx.Client) -> np.ndarray | None:
+    try:
+        if url_or_data.startswith("data:"):
+            raw = base64.b64decode(url_or_data.split(",", 1)[-1])
+        else:
+            r = client.get(url_or_data, timeout=60.0)
+            if r.status_code >= 400:
+                return None
+            raw = r.content
+        img = Image.open(io.BytesIO(raw)).convert("L")
+        if img.size != (width, height):
+            img = img.resize((width, height), Image.NEAREST)
+        return np.array(img)
+    except Exception:
+        return None
 
 
 def _detect_grounded_sync(image_path: Path) -> list[dict]:
@@ -35,175 +138,146 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
     token = (settings.replicate_api_token or "").strip()
     if not token:
         raise StructureDetectError(
-            "SegFormer failed and REPLICATE_API_TOKEN is not set for Grounded-SAM backup."
+            "REPLICATE_API_TOKEN is not set. Needed for SegFormer-quality fallback on Replicate."
         )
 
-    img = Image.open(image_path).convert("RGB")
-    img.thumbnail((1024, 1024))
-    width, height = img.size
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    data_uri, width, height = _image_data_uri(image_path)
+    gsam_model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
+    collected: list[dict] = []
 
-    prompt = " . ".join(p[0] for p in _PROMPT_MAP)
-    model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
-    # Replicate allows Prefer wait between 1 and 60 only
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Prefer": "wait=60",
-    }
-    payloads = [
-        {
-            "input": {
-                "image": data_uri,
-                "prompt": prompt,
-                "negative_prompt": "tree, person, car, sky, ground only",
-                "box_threshold": 0.25,
-                "text_threshold": 0.20,
-            }
-        },
-        {
-            "input": {
-                "image": data_uri,
-                "query": prompt,
-            }
-        },
-    ]
-
-    try:
-        with httpx.Client(timeout=180.0) as client:
-            data = None
-            last_status = None
-            last_body = ""
-            for payload in payloads:
-                try:
-                    resp = client.post(
-                        f"https://api.replicate.com/v1/models/{model}/predictions",
-                        headers=headers,
-                        json=payload,
-                    )
-                except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
-                    raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
-                last_status = resp.status_code
-                last_body = resp.text[:180]
-                if resp.status_code < 400:
-                    data = resp.json()
-                    break
-
-            if data is None:
-                raise StructureDetectError(
-                    f"Replicate segmentation failed: {last_status} {last_body}"
+    with httpx.Client(timeout=180.0) as client:
+        for prompt, rtype in _CLASS_PROMPTS:
+            output = _replicate_predict(
+                client,
+                token,
+                gsam_model,
+                {
+                    "image": data_uri,
+                    "mask_prompt": prompt,
+                    "negative_mask_prompt": "sky, tree, person, car, grass, ground",
+                },
+            )
+            # Alternate schema used by some Grounded-SAM forks
+            if output is None:
+                output = _replicate_predict(
+                    client,
+                    token,
+                    gsam_model,
+                    {"image": data_uri, "keywords": prompt},
                 )
+            if output is None:
+                continue
 
-            output = data.get("output")
-            get_url = (data.get("urls") or {}).get("get")
-            status = (data.get("status") or "").lower()
+            for mask_url in _masks_from_output(output):
+                arr = _load_mask(mask_url, width, height, client)
+                if arr is None:
+                    continue
+                # Skip near-empty masks
+                if float(np.mean(arr > 127)) < 0.001:
+                    continue
+                collected.extend(
+                    _mask_to_regions(arr, rtype, _pretty_label(rtype, rtype), 0.78, max_parts=12)
+                )
+                for r in collected[-12:]:
+                    r["source"] = "replicate_grounded_sam"
 
-            if not output and get_url and status not in {"succeeded", "failed", "canceled"}:
-                for _ in range(60):
-                    time.sleep(2)
-                    try:
-                        st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
-                    except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
-                        raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
-                    body = st.json()
-                    status = (body.get("status") or "").lower()
-                    if status == "succeeded":
-                        output = body.get("output")
-                        break
-                    if status in {"failed", "canceled"}:
-                        raise StructureDetectError("Replicate Grounded-SAM prediction failed")
+        # If windows/doors still missing, use Grounding DINO boxes (high recall on openings)
+        windows = sum(1 for r in collected if r["region_type"] == RegionType.window.value)
+        if windows < 2:
+            dino_model = (settings.replicate_dino_model or "adirik/grounding-dino").strip()
+            dino_out = _replicate_predict(
+                client,
+                token,
+                dino_model,
+                {
+                    "image": data_uri,
+                    "query": "window . door . balcony . railing . pillar . roof",
+                    "box_threshold": 0.25,
+                    "text_threshold": 0.20,
+                },
+            )
+            collected.extend(_parse_dino_output(dino_out, width, height))
 
-            if not output:
-                raise StructureDetectError("Replicate Grounded-SAM returned empty output")
+    merged = _merge_region_lists(collected)
+    if not merged:
+        raise StructureDetectError(
+            "Replicate Grounded-SAM / Grounding-DINO found no facade parts. "
+            "Try another photo or draw regions manually."
+        )
+    logger.info(
+        "Replicate detect → %s regions (%s non-wall)",
+        len(merged),
+        sum(1 for r in merged if r["region_type"] != RegionType.main_wall.value),
+    )
+    return merged
 
-            regions = _parse_grounded_output(output, width, height, client)
-            if not regions:
-                raise StructureDetectError("Grounded-SAM found no facade parts in this photo")
-            return regions
-    except StructureDetectError:
-        raise
-    except Exception as exc:
-        raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
 
-
-def _parse_grounded_output(output, width: int, height: int, client: httpx.Client) -> list[dict]:
-    """Best-effort parse of common Grounded-SAM Replicate outputs."""
+def _parse_dino_output(output, width: int, height: int) -> list[dict]:
     regions: list[dict] = []
+    if output is None:
+        return regions
 
-    masks = []
-    labels = []
+    detections = []
     if isinstance(output, dict):
-        masks = output.get("masks") or output.get("mask") or output.get("annotated") or []
-        labels = output.get("labels") or output.get("tags") or output.get("phrases") or []
-        if isinstance(masks, str):
-            masks = [masks]
-        detections = output.get("detections") or output.get("boxes") or []
-        if detections and not masks:
-            for det in detections:
-                if not isinstance(det, dict):
-                    continue
-                label = str(det.get("label") or det.get("phrase") or "")
-                box = det.get("bbox") or det.get("box") or det.get("xyxy")
-                rtype = _label_to_type(label)
-                if not rtype or not box or len(box) < 4:
-                    continue
-                x0, y0, x1, y1 = [float(v) for v in box[:4]]
-                if max(x0, y0, x1, y1) > 1.5:
-                    x0, x1 = x0 / width, x1 / width
-                    y0, y1 = y0 / height, y1 / height
-                points = [
+        detections = (
+            output.get("detections")
+            or output.get("boxes")
+            or output.get("predictions")
+            or output.get("result")
+            or []
+        )
+        if isinstance(detections, dict):
+            detections = detections.get("detections") or detections.get("boxes") or []
+    elif isinstance(output, list):
+        detections = output
+
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        label = str(det.get("label") or det.get("phrase") or det.get("text") or "")
+        rtype = _label_to_type(label)
+        if not rtype:
+            continue
+        box = det.get("bbox") or det.get("box") or det.get("xyxy") or det.get("coordinates")
+        if not box or len(box) < 4:
+            continue
+        x0, y0, x1, y1 = [float(v) for v in box[:4]]
+        # Some APIs return cx,cy,w,h
+        if det.get("bbox_format") == "cxcywh" or (x1 < x0 or y1 < y0):
+            continue
+        if max(x0, y0, x1, y1) > 1.5:
+            x0, x1 = x0 / width, x1 / width
+            y0, y1 = y0 / height, y1 / height
+        x0, y0 = max(0.0, min(1.0, x0)), max(0.0, min(1.0, y0))
+        x1, y1 = max(0.0, min(1.0, x1)), max(0.0, min(1.0, y1))
+        if x1 - x0 < 0.01 or y1 - y0 < 0.01:
+            continue
+        regions.append(
+            {
+                "region_type": rtype,
+                "label": _pretty_label(rtype, label),
+                "points": [
                     {"x": round(x0, 4), "y": round(y0, 4)},
                     {"x": round(x1, 4), "y": round(y0, 4)},
                     {"x": round(x1, 4), "y": round(y1, 4)},
                     {"x": round(x0, 4), "y": round(y1, 4)},
-                ]
-                regions.append(
-                    {
-                        "region_type": rtype,
-                        "label": label.title() or rtype,
-                        "points": points,
-                        "confidence": float(det.get("confidence") or det.get("score") or 0.65),
-                        "source": "grounded_sam",
-                    }
-                )
-            return regions
-    elif isinstance(output, list):
-        masks = output
-
-    for i, m in enumerate(masks):
-        if not isinstance(m, str):
-            continue
-        try:
-            if m.startswith("data:"):
-                raw = base64.b64decode(m.split(",", 1)[-1])
-            else:
-                r = client.get(m, timeout=60.0)
-                if r.status_code >= 400:
-                    continue
-                raw = r.content
-            arr = np.array(Image.open(io.BytesIO(raw)).convert("L").resize((width, height), Image.NEAREST))
-        except Exception:
-            continue
-        label = ""
-        if isinstance(labels, list) and i < len(labels):
-            label = str(labels[i])
-        rtype = _label_to_type(label) or RegionType.main_wall.value
-        pretty = label.replace("_", " ").title() if label else "Region"
-        regions.extend(_mask_to_regions(arr, rtype, pretty, 0.7))
+                ],
+                "confidence": float(det.get("confidence") or det.get("score") or 0.7),
+                "source": "replicate_grounding_dino",
+            }
+        )
     return regions
 
 
 def _label_to_type(label: str) -> str | None:
     key = (label or "").lower()
-    if any(w in key for w in ("window",)):
+    if "window" in key:
         return RegionType.window.value
     if any(w in key for w in ("door", "gate", "entrance")):
         return RegionType.gate.value
     if "balcony" in key or "porch" in key:
         return RegionType.balcony.value
-    if "roof" in key or "awning" in key:
+    if "roof" in key or "awning" in key or "cornice" in key:
         return RegionType.roof_edge.value
     if "rail" in key or "fence" in key:
         return RegionType.railing.value
