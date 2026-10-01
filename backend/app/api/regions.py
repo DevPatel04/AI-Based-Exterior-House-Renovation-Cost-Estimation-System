@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+import logging
 
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
@@ -9,6 +10,8 @@ from app.schemas import RegionCreate, RegionOut, RegionUpdate
 from app.services.gemini import detect_structure_regions
 from app.services.segformer import StructureDetectError
 from app.services.storage import absolute_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{project_id}/regions", tags=["regions"])
 
@@ -33,7 +36,11 @@ async def detect_regions(
     try:
         detected = await detect_structure_regions(absolute_path(image.file_path))
     except StructureDetectError as exc:
+        logger.error("Region detect 503 for project %s: %s", project_id, exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Region detect unexpected error for project %s", project_id)
+        raise HTTPException(status_code=503, detail=f"Detection failed: {exc}") from exc
     if not detected:
         raise HTTPException(
             status_code=422,

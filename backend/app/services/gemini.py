@@ -51,18 +51,24 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     Order:
       1) SegFormer ADE + CMP (merged) + OpenCV window/door enrich
       2) If still walls-only and Replicate token set → Grounded-SAM merge
+      3) OpenCV-only fallback (so detect never hard-fails without tokens)
     """
-    from app.models import RegionType
-    from app.services.segformer import detect_segformer_regions
+    import logging
 
+    from app.models import RegionType
+    from app.services.segformer import detect_opencv_fallback, detect_segformer_regions
+
+    logger = logging.getLogger(__name__)
     last_err: Exception | None = None
     regions: list[dict] = []
     try:
         regions = await detect_segformer_regions(image_path)
     except StructureDetectError as exc:
         last_err = exc
+        logger.error("SegFormer detect failed: %s", exc)
     except Exception as exc:
         last_err = StructureDetectError(str(exc))
+        logger.exception("SegFormer detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     settings = get_settings()
@@ -75,14 +81,30 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             grounded = await detect_grounded_regions(image_path)
             regions = _merge_region_lists(regions, grounded)
         except StructureDetectError as exc:
+            logger.error("Grounded-SAM detect failed: %s", exc)
             if not regions:
                 last_err = exc
         except Exception as exc:
+            logger.exception("Grounded-SAM detect crashed: %s", exc)
             if not regions:
                 last_err = StructureDetectError(str(exc))
 
     if regions:
         return regions
+
+    # Always try OpenCV fallback instead of returning 503 when cloud AI is down/misconfigured
+    try:
+        from fastapi.concurrency import run_in_threadpool
+
+        fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
+        if fallback:
+            if last_err:
+                logger.warning("Cloud detect unavailable (%s); served OpenCV fallback", last_err)
+            return fallback
+    except Exception as exc:
+        logger.exception("OpenCV fallback failed: %s", exc)
+        last_err = StructureDetectError(str(exc))
+
     if last_err:
         raise last_err
     raise StructureDetectError(

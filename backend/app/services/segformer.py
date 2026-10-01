@@ -484,6 +484,48 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     return _merge_region_lists(regions, added)
 
 
+def detect_opencv_fallback(image_path: Path) -> list[dict]:
+    """
+    Last-resort detector when HF/Replicate are unavailable.
+    Places a facade wall box on the central image band, then finds windows/doors.
+    """
+    try:
+        pil = Image.open(image_path).convert("RGB")
+        pil.thumbnail((1024, 1024))
+        rgb = np.array(pil)
+    except Exception as exc:
+        raise StructureDetectError(f"Could not read project image: {exc}") from exc
+
+    h, w = rgb.shape[:2]
+    # Estimate facade as the densest edge band in the middle of the frame
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    # Ignore outer 5% (often sky/ground margins)
+    ys, xs = np.where(edges > 0)
+    if len(xs) > 50:
+        x0 = int(np.percentile(xs, 8))
+        x1 = int(np.percentile(xs, 92))
+        y0 = int(np.percentile(ys, 10))
+        y1 = int(np.percentile(ys, 90))
+    else:
+        x0, y0, x1, y1 = int(w * 0.12), int(h * 0.15), int(w * 0.88), int(h * 0.88)
+
+    wall = {
+        "region_type": RegionType.main_wall.value,
+        "label": "Main wall",
+        "points": _bbox_points(x0, y0, x1, y1, w, h),
+        "confidence": 0.45,
+        "source": "opencv_fallback",
+    }
+    regions = enrich_with_opencv_parts(rgb, [wall])
+    if not regions:
+        regions = [wall]
+    for r in regions:
+        r["source"] = r.get("source") or "opencv_fallback"
+    logger.warning("Using OpenCV fallback structure detection (%s regions)", len(regions))
+    return regions
+
+
 def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, token: str) -> list | dict | None:
     headers = {
         "Authorization": f"Bearer {token}",
