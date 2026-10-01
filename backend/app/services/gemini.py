@@ -46,38 +46,43 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
 
 async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
-    Structure detection — SegFormer only (no hardcoded default boxes).
+    Structure detection (no hardcoded default boxes).
 
     Order:
-      1) SegFormer semantic masks (HF Inference)
-      2) Grounded-SAM on Replicate (if REPLICATE_API_TOKEN set)
-    Raises StructureDetectError when neither produces real regions.
+      1) SegFormer ADE + CMP (merged) + OpenCV window/door enrich
+      2) If still walls-only and Replicate token set → Grounded-SAM merge
     """
+    from app.models import RegionType
     from app.services.segformer import detect_segformer_regions
 
     last_err: Exception | None = None
+    regions: list[dict] = []
     try:
         regions = await detect_segformer_regions(image_path)
-        if regions:
-            return regions
     except StructureDetectError as exc:
         last_err = exc
     except Exception as exc:
         last_err = StructureDetectError(str(exc))
 
+    non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     settings = get_settings()
-    if (settings.replicate_api_token or "").strip():
+    need_parts = non_wall < 2
+    if need_parts and (settings.replicate_api_token or "").strip():
         try:
             from app.services.grounded_detect import detect_grounded_regions
+            from app.services.segformer import _merge_region_lists
 
-            regions = await detect_grounded_regions(image_path)
-            if regions:
-                return regions
+            grounded = await detect_grounded_regions(image_path)
+            regions = _merge_region_lists(regions, grounded)
         except StructureDetectError as exc:
-            last_err = exc
+            if not regions:
+                last_err = exc
         except Exception as exc:
-            last_err = StructureDetectError(str(exc))
+            if not regions:
+                last_err = StructureDetectError(str(exc))
 
+    if regions:
+        return regions
     if last_err:
         raise last_err
     raise StructureDetectError(

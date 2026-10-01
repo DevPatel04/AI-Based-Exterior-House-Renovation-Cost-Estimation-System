@@ -1,10 +1,9 @@
-"""SegFormer facade / building structure detection (Hugging Face Inference).
+"""SegFormer facade structure detection (Hugging Face Inference).
 
-Replaces the old Gemini-polygon + hardcoded DEFAULT_REGIONS path.
-Uses semantic masks → OpenCV contours → Konva polygons.
-
-Primary model: nvidia/segformer-b0-finetuned-ade-512-512 (reliable on HF Inference).
-Optional CMP facade model can be set via SEGFORMER_MODEL.
+ADE SegFormer often labels the whole house as one "building" mask.
+We therefore:
+  1) Run ADE + CMP models and merge labels
+  2) Enrich walls-only results with OpenCV window/door/roof candidates
 """
 
 from __future__ import annotations
@@ -26,9 +25,7 @@ from app.models import RegionType
 
 logger = logging.getLogger(__name__)
 
-# ADE20K + CMP-style labels → our RegionType
 _LABEL_MAP: dict[str, str] = {
-    # ADE / general
     "wall": RegionType.main_wall.value,
     "building": RegionType.main_wall.value,
     "house": RegionType.main_wall.value,
@@ -49,12 +46,11 @@ _LABEL_MAP: dict[str, str] = {
     "awning": RegionType.roof_edge.value,
     "roof": RegionType.roof_edge.value,
     "roof_edge": RegionType.roof_edge.value,
-    # CMP facade
     "facade": RegionType.main_wall.value,
     "main_wall": RegionType.main_wall.value,
     "cornice": RegionType.roof_edge.value,
     "parapet": RegionType.parapet.value,
-    "sill": RegionType.other.value,
+    "sill": RegionType.window.value,  # window sill → treat near window
     "molding": RegionType.other.value,
     "deco": RegionType.other.value,
     "blind": RegionType.window.value,
@@ -94,6 +90,14 @@ _SKIP = {
     "pole",
     "streetlight",
     "traffic",
+    "ceiling",
+    "floor",
+    "carpet",
+    "sofa",
+    "chair",
+    "table",
+    "bed",
+    "cabinet",
 }
 
 
@@ -116,8 +120,26 @@ def _map_label(label: str) -> str | None:
     return None
 
 
-def _clean_mask(mask: np.ndarray) -> np.ndarray:
+def _pretty_label(rtype: str, raw: str) -> str:
+    defaults = {
+        RegionType.main_wall.value: "Main wall",
+        RegionType.window.value: "Window",
+        RegionType.gate.value: "Door / gate",
+        RegionType.balcony.value: "Balcony",
+        RegionType.roof_edge.value: "Roof edge",
+        RegionType.railing.value: "Railing",
+        RegionType.pillar.value: "Pillar",
+        RegionType.parapet.value: "Parapet",
+    }
+    return defaults.get(rtype) or raw.replace("_", " ").title()
+
+
+def _clean_mask(mask: np.ndarray, soft: bool = False) -> np.ndarray:
     binary = (mask > 127).astype(np.uint8) * 255
+    if soft:
+        kernel = np.ones((3, 3), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+        return binary
     kernel = np.ones((5, 5), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -144,28 +166,46 @@ def _contour_to_points(contour, w: int, h: int) -> list[dict] | None:
     ]
 
 
+def _bbox_points(x0: int, y0: int, x1: int, y1: int, w: int, h: int) -> list[dict]:
+    return [
+        {"x": round(float(np.clip(x0 / w, 0, 1)), 4), "y": round(float(np.clip(y0 / h, 0, 1)), 4)},
+        {"x": round(float(np.clip(x1 / w, 0, 1)), 4), "y": round(float(np.clip(y0 / h, 0, 1)), 4)},
+        {"x": round(float(np.clip(x1 / w, 0, 1)), 4), "y": round(float(np.clip(y1 / h, 0, 1)), 4)},
+        {"x": round(float(np.clip(x0 / w, 0, 1)), 4), "y": round(float(np.clip(y1 / h, 0, 1)), 4)},
+    ]
+
+
 def _mask_to_regions(
     mask: np.ndarray,
     region_type: str,
     label: str,
     score: float,
-    min_area_frac: float = 0.004,
-    max_parts: int = 8,
+    min_area_frac: float | None = None,
+    max_parts: int = 12,
 ) -> list[dict]:
-    """Split a class mask into separate connected components (e.g. each window)."""
     h, w = mask.shape[:2]
-    binary = _clean_mask(mask)
+    soft = region_type in {
+        RegionType.window.value,
+        RegionType.gate.value,
+        RegionType.railing.value,
+        RegionType.pillar.value,
+    }
+    binary = _clean_mask(mask, soft=soft)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
 
-    min_area = h * w * min_area_frac
-    # For main wall, keep larger pieces only; for windows allow smaller
-    if region_type == RegionType.main_wall.value:
-        min_area = h * w * 0.02
-    elif region_type == RegionType.window.value:
-        min_area = h * w * 0.003
+    if min_area_frac is None:
+        if region_type == RegionType.main_wall.value:
+            min_area_frac = 0.015
+        elif region_type == RegionType.window.value:
+            min_area_frac = 0.0008
+        elif region_type in {RegionType.gate.value, RegionType.pillar.value, RegionType.railing.value}:
+            min_area_frac = 0.0015
+        else:
+            min_area_frac = 0.003
 
+    min_area = h * w * min_area_frac
     scored = []
     for c in contours:
         area = float(cv2.contourArea(c))
@@ -175,8 +215,13 @@ def _mask_to_regions(
     scored.sort(key=lambda t: t[0], reverse=True)
 
     out: list[dict] = []
-    for i, (area, contour) in enumerate(scored[:max_parts]):
-        points = _contour_to_points(contour, w, h)
+    for i, (_area, contour) in enumerate(scored[:max_parts]):
+        # Prefer axis-aligned boxes for windows/doors (more editable in Konva)
+        if region_type in {RegionType.window.value, RegionType.gate.value}:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            points = _bbox_points(x, y, x + bw, y + bh, w, h)
+        else:
+            points = _contour_to_points(contour, w, h)
         if not points:
             continue
         suffix = f" {i + 1}" if len(scored) > 1 and region_type != RegionType.main_wall.value else ""
@@ -185,7 +230,7 @@ def _mask_to_regions(
                 "region_type": region_type,
                 "label": f"{label}{suffix}".strip(),
                 "points": points,
-                "confidence": min(0.95, max(0.45, float(score if score else 0.7))),
+                "confidence": min(0.95, max(0.4, float(score if score else 0.7))),
                 "source": "segformer",
             }
         )
@@ -219,6 +264,17 @@ def _decode_mask(mask_field, height: int, width: int) -> np.ndarray | None:
         return None
 
 
+def _poly_area(points: list[dict]) -> float:
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for i in range(len(points)):
+        j = (i + 1) % len(points)
+        area += points[i]["x"] * points[j]["y"]
+        area -= points[j]["x"] * points[i]["y"]
+    return abs(area) / 2.0
+
+
 def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
     regions: list[dict] = []
     items = payload if isinstance(payload, list) else [payload]
@@ -235,35 +291,197 @@ def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
         mask = _decode_mask(item.get("mask"), height, width)
         if mask is None:
             continue
-        pretty = label.replace("_", " ").title()
-        if rtype == RegionType.main_wall.value:
-            pretty = "Main wall"
-        elif rtype == RegionType.window.value:
-            pretty = "Window"
-        elif rtype == RegionType.gate.value:
-            pretty = "Door / gate"
-        elif rtype == RegionType.roof_edge.value:
-            pretty = "Roof edge"
-        regions.extend(_mask_to_regions(mask, rtype, pretty, float(score)))
+        regions.extend(_mask_to_regions(mask, rtype, _pretty_label(rtype, label), float(score)))
 
-    # Prefer one dominant main wall (largest)
     walls = [r for r in regions if r["region_type"] == RegionType.main_wall.value]
     others = [r for r in regions if r["region_type"] != RegionType.main_wall.value]
     if len(walls) > 1:
         walls.sort(key=lambda r: _poly_area(r["points"]), reverse=True)
-        walls = walls[:2]  # keep up to 2 large facade planes
+        walls = walls[:2]
     return walls + others
 
 
-def _poly_area(points: list[dict]) -> float:
-    if len(points) < 3:
+def _iou_norm(a: list[dict], b: list[dict]) -> float:
+    """Rough IoU from axis-aligned bboxes of polygons."""
+    def box(pts):
+        xs = [p["x"] for p in pts]
+        ys = [p["y"] for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    ax0, ay0, ax1, ay1 = box(a)
+    bx0, by0, bx1, by1 = box(b)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0:
         return 0.0
-    area = 0.0
-    for i in range(len(points)):
-        j = (i + 1) % len(points)
-        area += points[i]["x"] * points[j]["y"]
-        area -= points[j]["x"] * points[i]["y"]
-    return abs(area) / 2.0
+    area_a = max(1e-9, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1e-9, (bx1 - bx0) * (by1 - by0))
+    return inter / (area_a + area_b - inter)
+
+
+def _merge_region_lists(*lists: list[dict]) -> list[dict]:
+    """Merge detections; keep non-wall parts; dedupe overlapping same-type boxes."""
+    merged: list[dict] = []
+    for lst in lists:
+        for r in lst or []:
+            merged.append(r)
+
+    walls = [r for r in merged if r["region_type"] == RegionType.main_wall.value]
+    parts = [r for r in merged if r["region_type"] != RegionType.main_wall.value]
+
+    # One/two largest walls
+    walls.sort(key=lambda r: _poly_area(r["points"]), reverse=True)
+    walls = walls[:2]
+
+    kept: list[dict] = []
+    for r in sorted(parts, key=lambda x: float(x.get("confidence") or 0.5), reverse=True):
+        if any(
+            k["region_type"] == r["region_type"] and _iou_norm(k["points"], r["points"]) > 0.55
+            for k in kept
+        ):
+            continue
+        kept.append(r)
+
+    # Renumber window labels
+    win_i = 0
+    for r in kept:
+        if r["region_type"] == RegionType.window.value:
+            win_i += 1
+            r["label"] = f"Window {win_i}" if win_i > 1 or sum(
+                1 for x in kept if x["region_type"] == RegionType.window.value
+            ) > 1 else "Window"
+
+    return walls + kept
+
+
+def _wall_bbox_px(regions: list[dict], w: int, h: int) -> tuple[int, int, int, int]:
+    walls = [r for r in regions if r["region_type"] == RegionType.main_wall.value]
+    if not walls:
+        return int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)
+    pts = walls[0]["points"]
+    xs = [p["x"] for p in pts]
+    ys = [p["y"] for p in pts]
+    return (
+        int(min(xs) * w),
+        int(min(ys) * h),
+        int(max(xs) * w),
+        int(max(ys) * h),
+    )
+
+
+def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list[dict]:
+    """
+    When SegFormer only returns walls, find rectangular openings (windows/doors)
+    and a roof band inside the facade bbox using classical CV.
+    """
+    windows = sum(1 for r in regions if r["region_type"] == RegionType.window.value)
+    doors = sum(1 for r in regions if r["region_type"] == RegionType.gate.value)
+    # Always enrich when windows/doors are missing (ADE often returns wall-only)
+    if windows >= 2 and doors >= 1:
+        return regions
+
+    h, w = image_rgb.shape[:2]
+    x0, y0, x1, y1 = _wall_bbox_px(regions, w, h)
+    # Inset slightly so we stay on the facade surface
+    pad_x = int((x1 - x0) * 0.04)
+    pad_y = int((y1 - y0) * 0.06)
+    x0, y0 = max(0, x0 + pad_x), max(0, y0 + pad_y)
+    x1, y1 = min(w - 1, x1 - pad_x), min(h - 1, y1 - pad_y)
+    if x1 - x0 < 40 or y1 - y0 < 40:
+        return regions
+
+    crop = image_rgb[y0:y1, x0:x1]
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 40, 120)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+
+    # TREE so inner window frames are kept (EXTERNAL often misses them)
+    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    facade_area = float(max(1, (x1 - x0) * (y1 - y0)))
+    candidates: list[tuple[float, dict]] = []
+
+    for c in contours:
+        area = float(cv2.contourArea(c))
+        if area < facade_area * 0.002 or area > facade_area * 0.28:
+            continue
+        rx, ry, rw, rh = cv2.boundingRect(c)
+        if rw < 16 or rh < 16:
+            continue
+        aspect = rw / max(1, rh)
+        rectangularity = area / max(1.0, float(rw * rh))
+        if rectangularity < 0.32 or not (0.35 <= aspect <= 3.2):
+            continue
+
+        abs_x0, abs_y0 = x0 + rx, y0 + ry
+        abs_x1, abs_y1 = abs_x0 + rw, abs_y0 + rh
+        # Reject boxes glued to the outer frame
+        if abs_x0 <= x0 + 2 or abs_y0 <= y0 + 2 or abs_x1 >= x1 - 2 or abs_y1 >= y1 - 2:
+            if area > facade_area * 0.12:
+                continue
+
+        cy = ((abs_y0 + abs_y1) / 2) / h
+        points = _bbox_points(abs_x0, abs_y0, abs_x1, abs_y1, w, h)
+
+        if aspect < 0.6 and rh > rw * 1.35 and cy > 0.48:
+            rtype = RegionType.gate.value
+            label = "Door / gate"
+        else:
+            rtype = RegionType.window.value
+            label = "Window"
+
+        score = rectangularity * min(1.0, area / (facade_area * 0.02))
+        candidates.append(
+            (
+                score,
+                {
+                    "region_type": rtype,
+                    "label": label,
+                    "points": points,
+                    "confidence": 0.55,
+                    "source": "opencv_enrich",
+                },
+            )
+        )
+
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    added: list[dict] = []
+    for _score, reg in candidates:
+        rtype = reg["region_type"]
+        if rtype == RegionType.window.value and sum(1 for a in added if a["region_type"] == RegionType.window.value) >= 6:
+            continue
+        if rtype == RegionType.gate.value and any(a["region_type"] == RegionType.gate.value for a in added):
+            continue
+        if any(_iou_norm(a["points"], reg["points"]) > 0.4 for a in added):
+            continue
+        if any(
+            r["region_type"] != RegionType.main_wall.value and _iou_norm(r["points"], reg["points"]) > 0.4
+            for r in regions
+        ):
+            continue
+        added.append(reg)
+
+    if not any(r["region_type"] == RegionType.roof_edge.value for r in regions + added):
+        band_h = max(8, int((y1 - y0) * 0.08))
+        added.append(
+            {
+                "region_type": RegionType.roof_edge.value,
+                "label": "Roof edge",
+                "points": _bbox_points(x0, max(0, y0 - band_h // 2), x1, y0 + band_h, w, h),
+                "confidence": 0.5,
+                "source": "opencv_enrich",
+            }
+        )
+
+    wins = [a for a in added if a["region_type"] == RegionType.window.value]
+    for i, a in enumerate(wins, start=1):
+        a["label"] = f"Window {i}" if len(wins) > 1 else "Window"
+
+    if added:
+        logger.info("OpenCV enrich added %s parts (windows/doors/roof)", len(added))
+    return _merge_region_lists(regions, added)
 
 
 def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, token: str) -> list | dict | None:
@@ -295,7 +513,6 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
                 break
             if isinstance(data, dict) and data.get("error"):
                 last_err = str(data.get("error"))
-                # model loading
                 if "loading" in last_err.lower():
                     time.sleep(8)
                     continue
@@ -318,25 +535,28 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         raise StructureDetectError("ENABLE_SEGFORMER is false. Turn it on to detect structure regions.")
 
     try:
-        img = Image.open(image_path).convert("RGB")
-        img.thumbnail((1024, 1024))
-        width, height = img.size
+        pil = Image.open(image_path).convert("RGB")
+        pil.thumbnail((1024, 1024))
+        width, height = pil.size
+        rgb = np.array(pil)
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=92)
+        pil.save(buf, format="JPEG", quality=92)
         body = buf.getvalue()
     except Exception as exc:
         raise StructureDetectError(f"Could not read project image: {exc}") from exc
 
     primary = (settings.segformer_model or "nvidia/segformer-b0-finetuned-ade-512-512").strip()
-    # Try primary, then ADE, then CMP facade
-    models = [primary]
-    for alt in (
-        "nvidia/segformer-b0-finetuned-ade-512-512",
+    # CMP first for windows/doors/balcony; ADE for solid facade wall
+    models: list[str] = []
+    for m in (
         "Xpitfire/segformer-finetuned-segments-cmp-facade",
+        primary,
+        "nvidia/segformer-b0-finetuned-ade-512-512",
     ):
-        if alt not in models:
-            models.append(alt)
+        if m and m not in models:
+            models.append(m)
 
+    collected: list[list[dict]] = []
     with httpx.Client(timeout=180.0) as client:
         for model in models:
             data = _call_hf_image_segmentation(client, model, body, token)
@@ -344,13 +564,23 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
                 continue
             regions = _parse_hf_segmentation(data, width, height)
             if regions:
-                logger.info("SegFormer (%s) returned %s regions", model, len(regions))
-                return regions
+                logger.info(
+                    "SegFormer (%s) → %s regions (%s non-wall)",
+                    model,
+                    len(regions),
+                    sum(1 for r in regions if r["region_type"] != RegionType.main_wall.value),
+                )
+                collected.append(regions)
 
-    raise StructureDetectError(
-        "SegFormer returned no facade regions for this photo. "
-        "Try a clearer front-facing exterior (less tree occlusion), or draw regions manually."
-    )
+    if not collected:
+        raise StructureDetectError(
+            "SegFormer returned no facade regions for this photo. "
+            "Try a clearer front-facing exterior, or draw regions manually."
+        )
+
+    merged = _merge_region_lists(*collected)
+    merged = enrich_with_opencv_parts(rgb, merged)
+    return merged
 
 
 async def detect_segformer_regions(image_path: Path) -> list[dict]:
