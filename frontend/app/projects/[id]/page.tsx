@@ -51,6 +51,7 @@ export default function ProjectWorkspacePage() {
   const [activeDesignId, setActiveDesignId] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<Record<number, number>>({});
   const [suggestionReasons, setSuggestionReasons] = useState<Record<number, string>>({});
+  const [detectEngine, setDetectEngine] = useState<string>("");
   const [areas, setAreas] = useState<any[]>([]);
   const [quantities, setQuantities] = useState<any[]>([]);
   const [costs, setCosts] = useState<any>(null);
@@ -200,10 +201,16 @@ export default function ProjectWorkspacePage() {
       if (!ok) return;
     }
     setBusy(true);
-    setProgress("Detecting with SegFormer (masks)… this can take ~15–60s.");
+    setProgress("Detecting facade regions (Gemini → SegFormer → OpenCV)…");
     try {
-      const regs = await api.detectRegions(projectId);
+      const res = await api.detectRegions(projectId);
+      const regs = Array.isArray(res) ? res : res.regions || [];
+      const engine = Array.isArray(res) ? "" : res.engine || "";
+      const message =
+        (!Array.isArray(res) && res.message) ||
+        `Detected ${regs.length} regions. Drag handles to fine-tune.`;
       setRegions(regs);
+      setDetectEngine(engine);
       const alive = new Set(regs.map((r: any) => r.id));
       setAssignments((prev) => {
         const next: Record<number, number> = {};
@@ -212,7 +219,7 @@ export default function ProjectWorkspacePage() {
         }
         return next;
       });
-      toast.success(`SegFormer detected ${regs.length} regions. Drag handles to fine-tune.`);
+      toast.success(message);
     } catch (err: any) {
       toast.error(err.message);
       if (opts?.auto) autoDetectStarted.current = false;
@@ -815,6 +822,27 @@ export default function ProjectWorkspacePage() {
                 </Alert>
               )}
               <RegionCanvas projectId={projectId} imageId={primary.id} regions={regions} onChange={setRegions} />
+              {detectEngine && regions.length > 0 && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Last detect engine:{" "}
+                  <Badge tone={detectEngine === "gemini" ? "violet" : "neutral"}>
+                    {detectEngine === "gemini"
+                      ? "Gemini vision"
+                      : detectEngine === "segformer"
+                        ? "SegFormer"
+                        : detectEngine === "grounded_sam"
+                          ? "Grounded-SAM"
+                          : detectEngine === "opencv"
+                            ? "OpenCV"
+                            : detectEngine}
+                  </Badge>
+                  {detectEngine !== "gemini" && (
+                    <span className="ml-2">
+                      Tip: set <code className="text-[11px]">GEMINI_API_KEY</code> on the backend for Gemini-first detection.
+                    </span>
+                  )}
+                </p>
+              )}
             </>
           ) : (
             <EmptyState

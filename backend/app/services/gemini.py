@@ -240,7 +240,7 @@ async def detect_gemini_regions(image_path: Path) -> list[dict]:
     return await run_in_threadpool(_detect_gemini_sync, image_path)
 
 
-async def detect_structure_regions(image_path: Path) -> list[dict]:
+async def detect_structure_regions(image_path: Path) -> tuple[list[dict], dict]:
     """
     Detect facade parts (wall, windows, doors, roof, …).
 
@@ -249,6 +249,8 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
       2) SegFormer ADE + CMP (HF) + OpenCV enrich
       3) Grounded-SAM (Replicate) when openings scarce
       4) OpenCV-only fallback
+
+    Returns (regions, meta) where meta has primary engine + engines_used.
     """
     from app.models import RegionType
     from app.services.segformer import (
@@ -261,6 +263,7 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     settings = get_settings()
     last_err: Exception | None = None
     regions: list[dict] = []
+    engines_used: list[str] = []
     has_gemini = bool((settings.gemini_api_key or "").strip()) and getattr(
         settings, "enable_gemini_detect", True
     )
@@ -271,6 +274,7 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     if has_gemini:
         try:
             regions = await detect_gemini_regions(image_path)
+            engines_used.append("gemini")
             try:
                 from PIL import Image
                 import numpy as np
@@ -279,7 +283,10 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
                     rgb = np.array(Image.open(image_path).convert("RGB"))
                     return enrich_with_opencv_parts(rgb, regions)
 
+                before = len(regions)
                 regions = await run_in_threadpool(_enrich)
+                if len(regions) > before and "opencv" not in engines_used:
+                    engines_used.append("opencv")
             except Exception as enrich_exc:
                 logger.warning("DETECT post-Gemini OpenCV enrich skipped: %s", enrich_exc)
         except StructureDetectError as exc:
@@ -288,6 +295,8 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
         except Exception as exc:
             last_err = StructureDetectError(str(exc))
             logger.exception("Gemini detect crashed: %s", exc)
+    else:
+        logger.warning("DETECT GEMINI_API_KEY missing / detect disabled — skipping Gemini")
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
@@ -298,6 +307,7 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             logger.info("DETECT trying SegFormer (need_more=%s)", need_more)
             hf_regs = await detect_segformer_regions(image_path)
             regions = _merge_region_lists(regions, hf_regs)
+            engines_used.append("segformer")
         except StructureDetectError as exc:
             last_err = last_err or exc
             logger.error("SegFormer detect failed: %s", exc)
@@ -322,6 +332,7 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             )
             grounded = await detect_grounded_regions(image_path)
             regions = _merge_region_lists(regions, grounded)
+            engines_used.append("grounded_sam")
             try:
                 from PIL import Image
                 import numpy as np
@@ -330,7 +341,10 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
                     rgb = np.array(Image.open(image_path).convert("RGB"))
                     return enrich_with_opencv_parts(rgb, regions)
 
+                before = len(regions)
                 regions = await run_in_threadpool(_re_enrich)
+                if len(regions) > before and "opencv" not in engines_used:
+                    engines_used.append("opencv")
             except Exception as enrich_exc:
                 logger.warning("DETECT post-Grounded OpenCV enrich skipped: %s", enrich_exc)
         except StructureDetectError as exc:
@@ -343,14 +357,26 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
                 last_err = StructureDetectError(str(exc))
 
     if regions:
-        return regions
+        primary = _primary_engine(regions, engines_used)
+        meta = {
+            "primary": primary,
+            "engines_used": engines_used,
+            "region_count": len(regions),
+        }
+        logger.info("DETECT done primary=%s engines=%s count=%s", primary, engines_used, len(regions))
+        return regions, meta
 
     try:
         fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
         if fallback:
             if last_err:
                 logger.warning("Cloud detect unavailable (%s); served OpenCV fallback", last_err)
-            return fallback
+            engines_used.append("opencv")
+            return fallback, {
+                "primary": "opencv",
+                "engines_used": engines_used,
+                "region_count": len(fallback),
+            }
     except Exception as exc:
         logger.exception("OpenCV fallback failed: %s", exc)
         last_err = StructureDetectError(str(exc))
@@ -361,6 +387,43 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
         "No structure regions detected. Set GEMINI_API_KEY (preferred), "
         "HF_TOKEN for SegFormer, or REPLICATE_API_TOKEN for Grounded-SAM."
     )
+
+
+def _primary_engine(regions: list[dict], engines_used: list[str]) -> str:
+    rank = {
+        "gemini_detect": "gemini",
+        "gemini": "gemini",
+        "cmp": "segformer",
+        "ade": "segformer",
+        "segformer": "segformer",
+        "grounded_sam": "grounded_sam",
+        "opencv_enrich": "opencv",
+        "opencv_fallback": "opencv",
+        "opencv": "opencv",
+    }
+    # Prefer highest-rank source actually present on regions
+    source_rank = {
+        "gemini_detect": 100,
+        "grounded_sam": 80,
+        "cmp": 70,
+        "ade": 60,
+        "segformer": 50,
+        "opencv_enrich": 30,
+        "opencv_fallback": 20,
+    }
+    best_src = None
+    best_score = -1
+    for r in regions:
+        src = (r.get("source") or "").strip()
+        score = source_rank.get(src, 0)
+        if score > best_score:
+            best_score = score
+            best_src = src
+    if best_src and best_src in rank:
+        return rank[best_src]
+    if engines_used:
+        return engines_used[0]
+    return "unknown"
 
 
 def build_redesign_prompt(material_summary: str) -> str:

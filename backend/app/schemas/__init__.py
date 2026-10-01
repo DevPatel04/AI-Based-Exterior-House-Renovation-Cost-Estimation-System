@@ -148,6 +148,13 @@ class RegionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DetectRegionsResponse(BaseModel):
+    regions: list[RegionOut]
+    engine: str = "unknown"
+    engines_used: list[str] = []
+    message: str = ""
+
+
 class MaterialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     material_type: MaterialType

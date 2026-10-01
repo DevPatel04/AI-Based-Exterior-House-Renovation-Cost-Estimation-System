@@ -6,7 +6,7 @@ from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
 from app.models import ProjectImage, RegionType, StructureRegion, User
-from app.schemas import RegionCreate, RegionOut, RegionUpdate
+from app.schemas import DetectRegionsResponse, RegionCreate, RegionOut, RegionUpdate
 from app.services.gemini import detect_structure_regions
 from app.services.segformer import StructureDetectError
 from app.services.storage import absolute_path
@@ -15,8 +15,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/projects/{project_id}/regions", tags=["regions"])
 
+_ENGINE_LABELS = {
+    "gemini": "Gemini vision",
+    "segformer": "SegFormer",
+    "grounded_sam": "Grounded-SAM",
+    "opencv": "OpenCV",
+    "unknown": "Auto-detect",
+}
 
-@router.post("/detect", response_model=list[RegionOut])
+
+@router.post("/detect", response_model=DetectRegionsResponse)
 async def detect_regions(
     project_id: int,
     user: User = Depends(require_permission("regions:edit")),
@@ -34,7 +42,7 @@ async def detect_regions(
         raise HTTPException(status_code=400, detail="Upload an exterior image first")
 
     try:
-        detected = await detect_structure_regions(absolute_path(image.file_path))
+        detected, meta = await detect_structure_regions(absolute_path(image.file_path))
     except StructureDetectError as exc:
         logger.error("Region detect 503 for project %s: %s", project_id, exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -67,7 +75,22 @@ async def detect_regions(
     db.commit()
     for r in created:
         db.refresh(r)
-    return created
+
+    engine = (meta or {}).get("primary") or "unknown"
+    used = list((meta or {}).get("engines_used") or [])
+    nice = _ENGINE_LABELS.get(engine, engine)
+    used_nice = ", ".join(_ENGINE_LABELS.get(e, e) for e in used) if used else nice
+    message = f"{nice} detected {len(created)} regions"
+    if len(used) > 1:
+        message += f" (pipeline: {used_nice})"
+    message += ". Drag handles to fine-tune."
+
+    return DetectRegionsResponse(
+        regions=created,
+        engine=engine,
+        engines_used=used,
+        message=message,
+    )
 
 
 @router.get("", response_model=list[RegionOut])

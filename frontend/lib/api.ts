@@ -185,7 +185,10 @@ export const api = {
   imageUrl: (projectId: number, imageId: number) =>
     `${API_URL}/api/projects/${projectId}/images/${imageId}/file`,
   detectRegions: (projectId: number) =>
-    request<any[]>(`/api/projects/${projectId}/regions/detect`, { method: "POST" }),
+    request<{ regions: any[]; engine: string; engines_used: string[]; message: string }>(
+      `/api/projects/${projectId}/regions/detect`,
+      { method: "POST" }
+    ),
   listRegions: (projectId: number) => request<any[]>(`/api/projects/${projectId}/regions`),
   createRegion: (projectId: number, body: object) =>
     request(`/api/projects/${projectId}/regions`, {
