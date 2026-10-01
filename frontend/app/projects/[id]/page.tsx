@@ -197,6 +197,14 @@ export default function ProjectWorkspacePage() {
     try {
       const regs = await api.detectRegions(projectId);
       setRegions(regs);
+      const alive = new Set(regs.map((r: any) => r.id));
+      setAssignments((prev) => {
+        const next: Record<number, number> = {};
+        for (const [rid, mid] of Object.entries(prev)) {
+          if (alive.has(Number(rid))) next[Number(rid)] = mid;
+        }
+        return next;
+      });
       toast.success(`SegFormer detected ${regs.length} regions. Drag handles to fine-tune.`);
     } catch (err: any) {
       toast.error(err.message);
@@ -214,21 +222,59 @@ export default function ProjectWorkspacePage() {
     return d.id as number;
   }
 
+  function buildAssignmentItems(): { region_id: number; material_id: number }[] | null {
+    const regionIds = new Set(regions.map((r) => r.id));
+    const materialById = new Map(materials.map((m) => [m.id, m]));
+    const staleRegions: number[] = [];
+    const badMaterials: { id: number; regionId: number }[] = [];
+    const items = Object.entries(assignments)
+      .filter(([, material_id]) => Number(material_id) > 0)
+      .map(([region_id, material_id]) => ({
+        region_id: Number(region_id),
+        material_id: Number(material_id),
+      }))
+      .filter((item) => {
+        if (!regionIds.has(item.region_id)) {
+          staleRegions.push(item.region_id);
+          return false;
+        }
+        if (!materialById.has(item.material_id)) {
+          badMaterials.push({ id: item.material_id, regionId: item.region_id });
+          return false;
+        }
+        return true;
+      });
+    if (staleRegions.length || badMaterials.length) {
+      const parts: string[] = [];
+      if (staleRegions.length) {
+        parts.push(
+          `Wrong region id(s): ${staleRegions.join(", ")} (re-detect replaced them — re-select materials)`
+        );
+      }
+      if (badMaterials.length) {
+        parts.push(
+          `Wrong material id(s): ${badMaterials
+            .map((b) => `${b.id} (for region ${b.regionId})`)
+            .join(", ")}`
+        );
+      }
+      toast.error(parts.join(". "));
+      return null;
+    }
+    if (!items.length) {
+      toast.error("Select at least one material before saving.");
+      return null;
+    }
+    return items;
+  }
+
   async function saveAssignments() {
     setBusy(true);
     setProgress("Saving materials…");
     try {
       const designId = await ensureDesign();
-      const items = Object.entries(assignments)
-        .filter(([, material_id]) => Number(material_id) > 0)
-        .map(([region_id, material_id]) => ({
-          region_id: Number(region_id),
-          material_id: Number(material_id),
-        }));
-      if (!items.length) {
-        toast.error("Select at least one material before saving.");
-        return;
-      }
+      const items = buildAssignmentItems();
+      if (!items) return;
       await api.assignMaterials(projectId, designId, items);
       await api.activateDesign(projectId, designId);
       await refresh();
@@ -248,14 +294,8 @@ export default function ProjectWorkspacePage() {
     try {
       const designId = await ensureDesign();
       // Persist current assignments onto this design so Design B (etc.) gets its own materials/prompt
-      const items = Object.entries(assignments)
-        .filter(([, material_id]) => Number(material_id) > 0)
-        .map(([region_id, material_id]) => ({
-          region_id: Number(region_id),
-          material_id: Number(material_id),
-        }));
-      if (!items.length) {
-        toast.error("Assign materials and save them on this design before generating.");
+      const items = buildAssignmentItems();
+      if (!items) {
         setStep(2);
         return;
       }

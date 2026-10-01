@@ -79,8 +79,45 @@ def assign_materials(
             .first()
         )
         material = db.get(Material, item.material_id)
-        if not region or not material:
-            raise HTTPException(status_code=400, detail="Invalid region or material")
+        if not region and not material:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid region and material: region_id={item.region_id} is not on this project "
+                    f"(re-detect may have replaced it), and material_id={item.material_id} was not found."
+                ),
+            )
+        if not region:
+            alive = [
+                rid
+                for (rid,) in db.query(StructureRegion.id)
+                .filter(StructureRegion.project_id == project.id)
+                .all()
+            ]
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid region (not material): region_id={item.region_id} is not on this project. "
+                    f"Current region ids: {alive or 'none'}. "
+                    "Re-detect replaces auto regions — re-select materials on current regions."
+                ),
+            )
+        if not material:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid material (not region): material_id={item.material_id} was not found "
+                    f"(for region_id={item.region_id}). Deleted or never seeded — pick another from the catalog."
+                ),
+            )
+        if not material.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid material: “{material.name}” (id={material.id}) is inactive. "
+                    "Choose an active material."
+                ),
+            )
         db.add(
             DesignRegionMaterial(
                 design_id=design.id, region_id=item.region_id, material_id=item.material_id
