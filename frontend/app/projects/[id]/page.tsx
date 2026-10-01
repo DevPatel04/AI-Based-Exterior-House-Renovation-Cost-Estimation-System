@@ -1107,7 +1107,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Redesign with Gemini (Nano Banana) then Cloudflare — materials on “${activeDesign.name}”.`
+              ? `Redesign with Gemini Nano Banana (image edit) — materials on “${activeDesign.name}”.`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
@@ -1116,7 +1116,7 @@ export default function ProjectWorkspacePage() {
                 className="btn-outline"
                 onClick={() => runVisualize(true)}
                 disabled={busy}
-                title="Higher-res Cloudflare Workers AI render"
+                title="Higher-res Gemini image edit"
               >
                 <Icon name="sparkles" /> HQ render
               </button>

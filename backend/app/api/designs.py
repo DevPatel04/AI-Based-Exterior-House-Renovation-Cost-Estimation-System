@@ -232,8 +232,8 @@ async def visualize(
             detail=(
                 "AI redesign unavailable. "
                 + " | ".join(exc.notes)
-                + " Set GEMINI_API_KEY (Nano Banana image models) and/or "
-                + "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN."
+                + " Set GEMINI_API_KEY for Nano Banana image models "
+                + "(gemini-2.5-flash-image / gemini-3-pro-image)."
             ),
         ) from exc
     if scene_engine:

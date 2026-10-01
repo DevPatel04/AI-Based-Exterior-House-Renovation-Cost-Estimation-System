@@ -33,10 +33,9 @@ async def generate_redesign(
     assignments: list | None = None,
 ) -> tuple[str, str, list[str]]:
     """
-    Redesign engines (paid Gemini image first, then Cloudflare):
-      1) Gemini Nano Banana Pro / Flash Image — real photo edit
-      2) Cloudflare Workers AI Lightning — backup
-    Returns the real model image (no manual paint / blend overlay).
+    Redesign engines:
+      1) Gemini Nano Banana image edit (required / primary)
+      2) Cloudflare Lightning only if ENABLE_CLOUDFLARE_REDESIGN=true (backup)
     """
     from app.services.material_regions import RegionMaterialAssignment
 
@@ -65,6 +64,14 @@ async def generate_redesign(
     if region_assignments:
         notes.append(f"materials_in_prompt: {len(region_assignments)} regions")
 
+    if not has_gemini:
+        notes.append(
+            "gemini: set GEMINI_API_KEY and ENABLE_GEMINI_REDESIGN=true "
+            "(paid Nano Banana image models: gemini-2.5-flash-image / gemini-3-pro-image)"
+        )
+        if not has_cf:
+            raise RedesignUnavailableError(notes)
+
     if has_gemini:
         logger.info("REDESIGN try gemini image hq=%s", hq_mode)
         path, model_used, gem_err = await _gemini_image_edit(source_path, prompt, hq_mode=hq_mode)
@@ -77,7 +84,7 @@ async def generate_redesign(
         notes.append(f"gemini: {gem_err or 'failed'}")
 
     if has_cf:
-        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+        logger.info("REDESIGN try cloudflare backup hq=%s", hq_mode)
         path, cf_err = await _cloudflare_generate(source_path, prompt, hq_mode=hq_mode)
         if path:
             path = _resize_ai_to_source(source_path, path)
@@ -86,11 +93,6 @@ async def generate_redesign(
             return path, "cloudflare", notes
         notes.append(f"cloudflare: {cf_err or 'request failed'}")
 
-    if not has_gemini and not has_cf:
-        notes.append(
-            "set GEMINI_API_KEY + ENABLE_GEMINI_REDESIGN=true "
-            "(and/or CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)"
-        )
     logger.error("REDESIGN failed notes=%s", notes)
     raise RedesignUnavailableError(notes)
 
@@ -432,81 +434,148 @@ async def _gemini_image_edit(
     source_path: Path, prompt: str, hq_mode: bool = False
 ) -> tuple[str | None, str | None, str | None]:
     """
-    Paid Gemini Nano Banana image edit.
+    Gemini Nano Banana image-to-image edit via REST (responseModalities IMAGE).
     Returns (rel_path, model_id, error).
     """
-    from fastapi.concurrency import run_in_threadpool
-
     settings = get_settings()
     key = (settings.gemini_api_key or "").strip()
     if not key:
         return None, None, "GEMINI_API_KEY empty"
 
-    # Prefer Pro for HQ; Flash Image for speed; always keep legacy as last resort
+    # Stable image models first (widely available), then newer Pro/Flash Image
     models: list[str] = []
     primary = (settings.gemini_image_model or "gemini-3-pro-image").strip()
     fallback = (getattr(settings, "gemini_image_fallback_model", None) or "gemini-3.1-flash-image").strip()
     legacy = (getattr(settings, "gemini_image_legacy_model", None) or "gemini-2.5-flash-image").strip()
-    if hq_mode or getattr(settings, "enable_gemini_hq", True):
-        for m in (primary, fallback, legacy):
-            if m and m not in models:
-                models.append(m)
-    else:
-        for m in (fallback, primary, legacy):
-            if m and m not in models:
-                models.append(m)
+    # Order: HQ prefers Pro; normal prefers faster Flash Image, always end with stable 2.5
+    ordered = (primary, fallback, legacy) if (hq_mode or getattr(settings, "enable_gemini_hq", True)) else (
+        fallback,
+        legacy,
+        primary,
+    )
+    # Put proven stable Nano Banana early so accounts without Gemini 3 access still work
+    for m in (*ordered, "gemini-2.5-flash-image", "gemini-2.5-flash-image-preview"):
+        if m and m not in models:
+            models.append(m)
 
     edit_prompt = (
         f"{prompt}\n\n"
-        "Edit THIS uploaded photograph only. Keep the same house, camera, and layout. "
-        "Change facade materials as specified. Photoreal. No watermark. No new building."
+        "Edit THIS photograph (image-to-image). Keep the SAME house, camera angle, "
+        "window/door positions, and surroundings. Only change facade materials as specified. "
+        "Photoreal DSLR photo. No watermark, no logo, no text overlay, no new building."
     )
 
-    def _run_one(model_name: str) -> tuple[str | None, str | None]:
-        try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel(model_name)
-            uploaded = genai.upload_file(str(source_path))
-            result = model.generate_content([uploaded, edit_prompt])
-            root = ensure_upload_dirs()
-            name = f"{uuid.uuid4().hex}.png"
-            dest = root / "redesigns" / name
-            for cand in getattr(result, "candidates", []) or []:
-                content = getattr(cand, "content", None)
-                for part in getattr(content, "parts", []) or []:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and getattr(inline, "data", None):
-                        data = inline.data
-                        if isinstance(data, str):
-                            dest.write_bytes(base64.b64decode(data))
-                        else:
-                            dest.write_bytes(data)
-                        return f"redesigns/{name}", None
-            # Some SDK versions expose .parts on response
-            for part in getattr(result, "parts", []) or []:
-                inline = getattr(part, "inline_data", None)
-                if inline and getattr(inline, "data", None):
-                    data = inline.data
-                    if isinstance(data, str):
-                        dest.write_bytes(base64.b64decode(data))
-                    else:
-                        dest.write_bytes(data)
-                    return f"redesigns/{name}", None
-            return None, "no image bytes in response"
-        except Exception as exc:
-            return None, str(exc)[:200]
+    # Prepare JPEG bytes once
+    try:
+        img = Image.open(source_path).convert("RGB")
+        img.thumbnail((1280, 1280) if hq_mode else (1024, 1024))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        return None, None, f"could not read source image: {exc}"
 
     errors: list[str] = []
-    for model_name in models:
-        logger.info("REDESIGN gemini_image try model=%s", model_name)
-        path, err = await run_in_threadpool(_run_one, model_name)
-        if path:
-            return path, model_name, None
-        errors.append(f"{model_name}: {err or 'failed'}")
-        logger.warning("REDESIGN gemini_image miss %s", errors[-1])
-    return None, None, " | ".join(errors[:3]) if errors else "gemini image edit failed"
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        for model_name in models:
+            logger.info("REDESIGN gemini_image try model=%s", model_name)
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model_name}:generateContent?key={key}"
+            )
+            payloads = [
+                {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                                {"text": edit_prompt},
+                            ],
+                        }
+                    ],
+                    "generationConfig": {
+                        "responseModalities": ["TEXT", "IMAGE"],
+                        "temperature": 0.4,
+                    },
+                },
+                # Some older endpoints accept response_mime / imageConfig variants
+                {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+                                {"text": edit_prompt},
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "responseModalities": ["IMAGE"],
+                    },
+                },
+            ]
+            got_image = False
+            for payload in payloads:
+                try:
+                    resp = await client.post(url, json=payload)
+                except Exception as exc:
+                    errors.append(f"{model_name}: request {exc}"[:180])
+                    continue
+                if resp.status_code >= 400:
+                    err = f"{model_name}: HTTP {resp.status_code} {resp.text[:160]}"
+                    logger.warning("REDESIGN gemini_image %s", err)
+                    errors.append(err)
+                    # Don't retry alternate payload on hard auth/model errors
+                    if resp.status_code in {401, 403, 404}:
+                        break
+                    continue
+                try:
+                    data = resp.json()
+                except Exception:
+                    errors.append(f"{model_name}: non-json response")
+                    continue
+
+                raw = _extract_gemini_image_bytes(data)
+                if not raw:
+                    # Log blocking / text-only replies
+                    block = (
+                        (data.get("promptFeedback") or {}).get("blockReason")
+                        or (data.get("candidates") or [{}])[0].get("finishReason")
+                    )
+                    errors.append(f"{model_name}: no image bytes ({block or 'empty'})")
+                    continue
+
+                root = ensure_upload_dirs()
+                name = f"{uuid.uuid4().hex}.png"
+                dest = root / "redesigns" / name
+                dest.write_bytes(raw)
+                logger.info(
+                    "REDESIGN gemini_image ok model=%s bytes=%s", model_name, len(raw)
+                )
+                return f"redesigns/{name}", model_name, None
+
+            if not got_image:
+                continue
+
+    return None, None, " | ".join(errors[:4]) if errors else "gemini image edit failed"
+
+
+def _extract_gemini_image_bytes(data: dict) -> bytes | None:
+    """Pull inline image bytes from a Gemini generateContent JSON response."""
+    for cand in data.get("candidates") or []:
+        content = cand.get("content") or {}
+        for part in content.get("parts") or []:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if not inline:
+                continue
+            b64 = inline.get("data")
+            if not b64:
+                continue
+            try:
+                return base64.b64decode(b64)
+            except Exception:
+                continue
+    return None
 
 
 async def _gemini_hq(source_path: Path, prompt: str) -> str | None:

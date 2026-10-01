@@ -44,11 +44,11 @@ class Settings(BaseSettings):
     #   TTS/Live/Veo, gemini-2.0-* (shutdown).
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"  # text/vision describe — not image output
-    gemini_image_model: str = "gemini-3-pro-image"
+    gemini_image_model: str = "gemini-2.5-flash-image"
     gemini_image_fallback_model: str = "gemini-3.1-flash-image"
-    gemini_image_legacy_model: str = "gemini-2.5-flash-image"
+    gemini_image_legacy_model: str = "gemini-3-pro-image"
     enable_gemini_redesign: bool = True
-    enable_gemini_hq: bool = True  # prefer Pro image model when HQ mode
+    enable_gemini_hq: bool = True  # try higher-quality image models when HQ mode
     # SEGMENTATION (structure boxes) — use vision reasoning models, NOT image-gen:
     #   BEST: gemini-2.5-pro (structured boxes) or gemini-3.1-pro-preview
     #   OK:   gemini-3.8-flash / gemini-2.5-flash (faster, less accurate)
@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     # Vision model for describing the uploaded photo → redesign prompt context
     cloudflare_vision_model: str = "@cf/llava-hf/llava-1.5-7b-hf"
     enable_image_describe: bool = True
-
+    # Cloudflare redesign is backup only — Gemini Nano Banana is primary
+    enable_cloudflare_redesign: bool = False
     # Optional Hugging Face image-to-image (uses HF_TOKEN free monthly credits)
     enable_hf_img2img: bool = False
     hf_img2img_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
@@ -76,11 +77,10 @@ class Settings(BaseSettings):
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 20
 
-    # Redesign: Cloudflare Workers AI only
+    # Redesign engines — Gemini primary; Cloudflare optional backup (see enable_cloudflare_redesign above)
     enable_pollinations_nanobanana: bool = False
     pollinations_nanobanana_model: str = "nanobanana"
     pollinations_api_key: str = ""
-    enable_cloudflare_redesign: bool = True
 
     # Replicate redesign engines off — token kept for Grounded-SAM detect only
     replicate_api_token: str = ""
