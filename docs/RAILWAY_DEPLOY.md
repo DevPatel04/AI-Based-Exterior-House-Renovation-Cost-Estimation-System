@@ -54,11 +54,11 @@ git push origin develop
 | `ENVIRONMENT`           | `production`                                                   |
 | `CORS_ORIGINS`          | your frontend URL, e.g. `https://frontend-xxxx.up.railway.app` |
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
-| `GEMINI_API_KEY`        | optional — quality notes + **region refine** (best accuracy)   |
+| `GEMINI_API_KEY`        | recommended — vision detect, refine, quality notes (no hardcoded regions) |
 | `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
 | `CLOUDFLARE_API_TOKEN`  | optional                                                       |
 | `ENABLE_GEMINI_HQ`      | `false`                                                        |
-| `HF_TOKEN`              | **required for Detect** — [Hugging Face](https://huggingface.co/settings/tokens) SegFormer masks |
+| `HF_TOKEN`              | recommended — [Hugging Face](https://huggingface.co/settings/tokens) SegFormer masks |
 | `ENABLE_SEGFORMER`      | `true`                                                         |
 | `SEGFORMER_MODEL`       | default `nvidia/segformer-b0-finetuned-ade-512-512`            |
 | `ENABLE_DEPTH_SCALE`    | `true` (Depth Anything V2 scale when `HF_TOKEN` / Replicate set) |
