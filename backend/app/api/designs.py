@@ -222,8 +222,9 @@ async def visualize(
             detail=(
                 "AI redesign unavailable. "
                 + " | ".join(exc.notes)
-                + " Set ENABLE_POLLINATIONS_NANOBANANA=true (free) and/or "
-                + "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN with ENABLE_CLOUDFLARE_REDESIGN=true."
+                + " Pollinations nanobanana needs pollen (top up https://enter.pollinations.ai/), "
+                + "or set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, "
+                + "or enable Replicate (ENABLE_NANO_BANANA / ENABLE_REPLICATE_IMG2IMG)."
             ),
         ) from exc
     design.redesign_path = rel

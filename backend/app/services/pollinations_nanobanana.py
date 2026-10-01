@@ -131,6 +131,13 @@ async def generate_pollinations_nanobanana_redesign(
             )
             logger.error("REDESIGN pollinations auth_fail %s", err)
             return None, err
+        if resp.status_code == 402:
+            err = (
+                "HTTP 402 Pollinations balance empty — nanobanana needs pollen. "
+                "Top up at https://enter.pollinations.ai/ or set Cloudflare / Replicate as backup"
+            )
+            logger.error("REDESIGN pollinations %s", err)
+            return None, err
         if resp.status_code >= 400:
             err = f"edits HTTP {resp.status_code}: {resp.text[:180]}"
             logger.warning("REDESIGN pollinations %s", err)

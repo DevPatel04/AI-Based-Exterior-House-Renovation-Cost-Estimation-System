@@ -65,20 +65,20 @@ class Settings(BaseSettings):
 
     # Optional Replicate (paid) — off by default; Pollinations/Cloudflare are primary
     replicate_api_token: str = ""
-    enable_nano_banana: bool = False
+    enable_nano_banana: bool = True
     nano_banana_model: str = "google/nano-banana-2"
     nano_banana_resolution: str = "1K"  # 1K | 2K | 4K (HQ uses 2K)
-    enable_replicate_img2img: bool = False
+    enable_replicate_img2img: bool = True
     replicate_img2img_model: str = "lucataco/sdxl"
     replicate_img2img_strength: float = 0.45
     replicate_img2img_steps: int = 28
-    enable_replicate_controlnet: bool = False
+    enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85
     replicate_controlnet_steps: int = 24
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
-    # Real-photo material preview when AI engines fail
-    allow_local_redesign_fallback: bool = True
+    # Crude polygon paint is only a guide for AI — do not return it as the redesign
+    allow_local_redesign_fallback: bool = False
 
     # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
     hf_token: str = ""

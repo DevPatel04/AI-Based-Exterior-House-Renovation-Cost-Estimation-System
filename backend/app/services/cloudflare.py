@@ -69,8 +69,9 @@ async def generate_redesign(
 
     material_guide_rel: str | None = None
     material_guide_path: Path | None = None
+    # Material guide for AI only (subtle) — not shown as final redesign
     if region_assignments:
-        material_guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.85)
+        material_guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.45)
         if material_guide_rel:
             material_guide_path = abs_upload(material_guide_rel)
             logger.info("REDESIGN material_guide ready path=%s", material_guide_rel)
@@ -179,18 +180,10 @@ async def generate_redesign(
             return path, "replicate_controlnet", notes
         notes.append(f"replicate_controlnet: {err or 'failed'}")
 
-    # 4) Guaranteed region materials / photo edit
-    if material_guide_rel:
-        logger.info("REDESIGN ok engine=region_materials path=%s", material_guide_rel)
-        return material_guide_rel, "region_materials", notes
-
-    path = _photoreal_photo_edit(source_path, prompt)
-    if path:
-        logger.info("REDESIGN ok engine=photo_edit path=%s", path)
-        return path, "photo_edit", notes
-
+    # 4) Do NOT return crude polygon paint as the redesign (looks like white boxes).
+    # Only soft photo grade if explicitly allowed.
     if settings.allow_local_redesign_fallback:
-        path = _local_fallback_redesign(source_path, prompt)
+        path = _photoreal_photo_edit(source_path, prompt) or _local_fallback_redesign(source_path, prompt)
         logger.warning("REDESIGN local_fallback path=%s notes=%s", path, notes)
         return path, "photo_edit", notes
 
