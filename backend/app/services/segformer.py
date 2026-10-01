@@ -441,19 +441,38 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
         f"https://router.huggingface.co/hf-inference/models/{model}",
     ]
     last_err = None
+    t0 = time.perf_counter()
+    logger.info("DETECT hf_call start model=%s bytes=%s", model, len(body))
     for url in urls:
         for attempt in range(3):
             try:
                 resp = client.post(url, headers=headers, content=body)
             except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
                 last_err = _format_network_error(exc, "Hugging Face")
-                logger.warning("HF connect failed %s: %s", url, exc)
+                logger.warning(
+                    "DETECT hf_call connect_fail model=%s url=%s attempt=%s err=%s",
+                    model,
+                    url,
+                    attempt + 1,
+                    exc,
+                )
                 break
             if resp.status_code == 503:
+                logger.info(
+                    "DETECT hf_call model_loading model=%s attempt=%s status=503",
+                    model,
+                    attempt + 1,
+                )
                 time.sleep(5 + attempt * 5)
                 continue
             if resp.status_code >= 400:
                 last_err = f"{resp.status_code}: {resp.text[:200]}"
+                logger.warning(
+                    "DETECT hf_call http_error model=%s status=%s body=%s",
+                    model,
+                    resp.status_code,
+                    resp.text[:200],
+                )
                 break
             try:
                 data = resp.json()
@@ -463,12 +482,21 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
             if isinstance(data, dict) and data.get("error"):
                 last_err = str(data.get("error"))
                 if "loading" in last_err.lower():
+                    logger.info("DETECT hf_call still_loading model=%s err=%s", model, last_err)
                     time.sleep(8)
                     continue
                 break
+            ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "DETECT hf_call ok model=%s ms=%s segments=%s",
+                model,
+                ms,
+                len(data) if isinstance(data, list) else "dict",
+            )
             return data
+    ms = int((time.perf_counter() - t0) * 1000)
     if last_err:
-        logger.warning("HF SegFormer failed for %s: %s", model, last_err)
+        logger.warning("DETECT hf_call fail model=%s ms=%s err=%s", model, ms, last_err)
         # Propagate network errors so the API can show them clearly
         if "Cannot reach Hugging Face" in last_err or "timed out" in last_err.lower():
             raise StructureDetectError(last_err)
@@ -507,26 +535,38 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         if m and m not in models:
             models.append(m)
 
+    from app.services.detect_log import format_summary
+
     collected: list[list[dict]] = []
     network_err: str | None = None
+    logger.info(
+        "DETECT segformer begin image=%s size=%sx%s models=%s",
+        image_path.name,
+        width,
+        height,
+        models,
+    )
     with httpx.Client(timeout=180.0) as client:
         for model in models:
             try:
                 data = _call_hf_image_segmentation(client, model, body, token)
             except StructureDetectError as exc:
                 network_err = str(exc)
+                logger.error("DETECT segformer model_abort model=%s err=%s", model, exc)
                 continue
             if data is None:
+                logger.warning("DETECT segformer model_empty model=%s", model)
                 continue
             regions = _parse_hf_segmentation(data, width, height)
             if regions:
                 logger.info(
-                    "SegFormer (%s) → %s regions (%s non-wall)",
+                    "DETECT segformer model_ok model=%s %s",
                     model,
-                    len(regions),
-                    sum(1 for r in regions if r["region_type"] != RegionType.main_wall.value),
+                    format_summary(regions),
                 )
                 collected.append(regions)
+            else:
+                logger.warning("DETECT segformer parse_empty model=%s", model)
 
     if not collected:
         if network_err:
@@ -536,7 +576,9 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
             "Try a clearer front-facing exterior, or draw regions manually."
         )
 
-    return _merge_region_lists(*collected)
+    merged = _merge_region_lists(*collected)
+    logger.info("DETECT segformer merged %s", format_summary(merged))
+    return merged
 
 
 async def detect_segformer_regions(image_path: Path) -> list[dict]:

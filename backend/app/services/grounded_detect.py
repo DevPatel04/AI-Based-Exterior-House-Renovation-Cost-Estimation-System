@@ -70,6 +70,16 @@ def _replicate_predict(
         "Content-Type": "application/json",
         "Prefer": "wait=60",
     }
+    prompt_hint = (
+        input_payload.get("mask_prompt")
+        or input_payload.get("keywords")
+        or input_payload.get("query")
+        or ""
+    )
+    if isinstance(prompt_hint, str) and len(prompt_hint) > 60:
+        prompt_hint = prompt_hint[:57] + "..."
+    t0 = time.perf_counter()
+    logger.info("DETECT replicate_call start model=%s prompt=%r", model, prompt_hint)
     try:
         resp = client.post(
             f"https://api.replicate.com/v1/models/{model}/predictions",
@@ -80,16 +90,30 @@ def _replicate_predict(
         raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
 
     if resp.status_code >= 400:
-        logger.warning("Replicate %s → %s %s", model, resp.status_code, resp.text[:200])
+        ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning(
+            "DETECT replicate_call http_error model=%s ms=%s status=%s body=%s",
+            model,
+            ms,
+            resp.status_code,
+            resp.text[:200],
+        )
         return None
 
     data = resp.json()
     output = data.get("output")
     get_url = (data.get("urls") or {}).get("get")
     status = (data.get("status") or "").lower()
+    pred_id = data.get("id")
 
     if not output and get_url and status not in {"succeeded", "failed", "canceled"}:
-        for _ in range(45):
+        logger.info(
+            "DETECT replicate_call polling model=%s id=%s status=%s",
+            model,
+            pred_id,
+            status,
+        )
+        for poll in range(45):
             time.sleep(2)
             try:
                 st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
@@ -98,10 +122,38 @@ def _replicate_predict(
             body = st.json()
             status = (body.get("status") or "").lower()
             if status == "succeeded":
+                ms = int((time.perf_counter() - t0) * 1000)
+                logger.info(
+                    "DETECT replicate_call ok model=%s id=%s ms=%s polls=%s",
+                    model,
+                    pred_id,
+                    ms,
+                    poll + 1,
+                )
                 return body.get("output")
             if status in {"failed", "canceled"}:
+                ms = int((time.perf_counter() - t0) * 1000)
+                logger.warning(
+                    "DETECT replicate_call %s model=%s id=%s ms=%s err=%s",
+                    status,
+                    model,
+                    pred_id,
+                    ms,
+                    (body.get("error") or "")[:200],
+                )
                 return None
+        ms = int((time.perf_counter() - t0) * 1000)
+        logger.warning("DETECT replicate_call timeout model=%s id=%s ms=%s", model, pred_id, ms)
         return None
+    ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "DETECT replicate_call ok model=%s id=%s ms=%s status=%s waited=%s",
+        model,
+        pred_id,
+        ms,
+        status,
+        bool(output),
+    )
     return output
 
 
@@ -148,8 +200,11 @@ def _run_prompt_set(
     height: int,
     prompts: list[tuple[str, str]],
 ) -> list[dict]:
+    from app.services.detect_log import format_summary
+
     collected: list[dict] = []
     for prompt, rtype in prompts:
+        logger.info("DETECT grounded_sam class=%s prompt=%r", rtype, prompt[:50])
         output = _replicate_predict(
             client,
             token,
@@ -161,6 +216,7 @@ def _run_prompt_set(
             },
         )
         if output is None:
+            logger.info("DETECT grounded_sam retry keywords class=%s", rtype)
             output = _replicate_predict(
                 client,
                 token,
@@ -168,10 +224,13 @@ def _run_prompt_set(
                 {"image": data_uri, "keywords": prompt},
             )
         if output is None:
+            logger.warning("DETECT grounded_sam empty class=%s", rtype)
             continue
 
         before = len(collected)
-        for mask_url in _masks_from_output(output):
+        mask_urls = _masks_from_output(output)
+        logger.info("DETECT grounded_sam masks class=%s count=%s", rtype, len(mask_urls))
+        for mask_url in mask_urls:
             arr = _load_mask(mask_url, width, height, client)
             if arr is None:
                 continue
@@ -180,8 +239,15 @@ def _run_prompt_set(
             collected.extend(
                 _mask_to_regions(arr, rtype, _pretty_label(rtype, rtype), 0.78, max_parts=12)
             )
-        for r in collected[before:]:
+        added = collected[before:]
+        for r in added:
             r["source"] = "replicate_grounded_sam"
+        logger.info(
+            "DETECT grounded_sam class_done class=%s added=%s running=%s",
+            rtype,
+            len(added),
+            format_summary(collected),
+        )
     return collected
 
 
@@ -193,11 +259,15 @@ def _maybe_dino(
     height: int,
     collected: list[dict],
 ) -> list[dict]:
+    from app.services.detect_log import format_summary
+
     windows = sum(1 for r in collected if r["region_type"] == RegionType.window.value)
     if windows >= 2:
+        logger.info("DETECT grounding_dino skip windows=%s (>=2)", windows)
         return collected
     settings = get_settings()
     dino_model = (settings.replicate_dino_model or "adirik/grounding-dino").strip()
+    logger.info("DETECT grounding_dino start windows=%s model=%s", windows, dino_model)
     dino_out = _replicate_predict(
         client,
         token,
@@ -209,10 +279,18 @@ def _maybe_dino(
             "text_threshold": 0.18,
         },
     )
-    return collected + _parse_dino_output(dino_out, width, height)
+    extra = _parse_dino_output(dino_out, width, height)
+    logger.info(
+        "DETECT grounding_dino done added=%s %s",
+        len(extra),
+        format_summary(collected + extra),
+    )
+    return collected + extra
 
 
 def _detect_grounded_sync(image_path: Path, openings_only: bool = False) -> list[dict]:
+    from app.services.detect_log import format_summary
+
     settings = get_settings()
     token = (settings.replicate_api_token or "").strip()
     if not token:
@@ -223,6 +301,16 @@ def _detect_grounded_sync(image_path: Path, openings_only: bool = False) -> list
     data_uri, width, height = _image_data_uri(image_path)
     gsam_model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
     prompts = _OPENING_PROMPTS if openings_only else _CLASS_PROMPTS
+    mode = "openings" if openings_only else "full"
+    logger.info(
+        "DETECT grounded begin image=%s size=%sx%s mode=%s model=%s prompts=%s",
+        image_path.name,
+        width,
+        height,
+        mode,
+        gsam_model,
+        len(prompts),
+    )
 
     with httpx.Client(timeout=180.0) as client:
         collected = _run_prompt_set(client, token, gsam_model, data_uri, width, height, prompts)
@@ -234,12 +322,7 @@ def _detect_grounded_sync(image_path: Path, openings_only: bool = False) -> list
             "Replicate Grounded-SAM / Grounding-DINO found no facade parts. "
             "Try another photo or draw regions manually."
         )
-    logger.info(
-        "Replicate detect (%s) → %s regions (%s non-wall)",
-        "openings" if openings_only else "full",
-        len(merged),
-        sum(1 for r in merged if r["region_type"] != RegionType.main_wall.value),
-    )
+    logger.info("DETECT grounded done mode=%s %s", mode, format_summary(merged))
     return merged
 
 

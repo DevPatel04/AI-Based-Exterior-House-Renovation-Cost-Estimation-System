@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import logging
+import time
 
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
 from app.models import ProjectImage, RegionType, StructureRegion, User
 from app.schemas import RegionCreate, RegionOut, RegionUpdate
+from app.services.detect_log import format_summary
 from app.services.gemini import detect_structure_regions
 from app.services.segformer import StructureDetectError
 from app.services.storage import absolute_path
@@ -33,25 +35,55 @@ async def detect_regions(
     if not image:
         raise HTTPException(status_code=400, detail="Upload an exterior image first")
 
+    image_path = absolute_path(image.file_path)
+    logger.info(
+        "DETECT api start project=%s user=%s image_id=%s path=%s size=%sx%s",
+        project_id,
+        getattr(user, "id", None),
+        image.id,
+        image.file_path,
+        image.width_px,
+        image.height_px,
+    )
+    t0 = time.perf_counter()
     try:
-        detected = await detect_structure_regions(absolute_path(image.file_path))
+        detected = await detect_structure_regions(image_path)
     except StructureDetectError as exc:
-        logger.error("Region detect 503 for project %s: %s", project_id, exc)
+        ms = int((time.perf_counter() - t0) * 1000)
+        logger.error(
+            "DETECT api 503 project=%s ms=%s err=%s",
+            project_id,
+            ms,
+            exc,
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Region detect unexpected error for project %s", project_id)
+        ms = int((time.perf_counter() - t0) * 1000)
+        logger.exception(
+            "DETECT api unexpected project=%s ms=%s err=%s",
+            project_id,
+            ms,
+            exc,
+        )
         raise HTTPException(status_code=503, detail=f"Detection failed: {exc}") from exc
     if not detected:
+        logger.warning("DETECT api empty project=%s", project_id)
         raise HTTPException(
             status_code=422,
             detail="No structure regions found. Try a clearer front view, or draw regions manually.",
         )
 
     # Keep manually corrected regions; only wipe auto-detected ones
-    db.query(StructureRegion).filter(
-        StructureRegion.project_id == project.id,
-        StructureRegion.user_corrected.is_(False),
-    ).delete()
+    kept_manual = (
+        db.query(StructureRegion)
+        .filter(StructureRegion.project_id == project.id, StructureRegion.user_corrected.is_(True))
+        .count()
+    )
+    deleted = (
+        db.query(StructureRegion)
+        .filter(StructureRegion.project_id == project.id, StructureRegion.user_corrected.is_(False))
+        .delete()
+    )
     created = []
     for item in detected:
         region = StructureRegion(
@@ -67,6 +99,16 @@ async def detect_regions(
     db.commit()
     for r in created:
         db.refresh(r)
+    ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "DETECT api ok project=%s ms=%s wiped_auto=%s kept_manual=%s saved=%s %s",
+        project_id,
+        ms,
+        deleted,
+        kept_manual,
+        len(created),
+        format_summary(detected),
+    )
     return created
 
 

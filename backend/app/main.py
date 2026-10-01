@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,6 +10,22 @@ from app.core.database import SessionLocal
 from app.services.storage import ensure_upload_dirs
 
 settings = get_settings()
+
+# Ensure DETECT / structure-detection logs show in Railway (uvicorn default is INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    force=True,
+)
+for _name in (
+    "app.api.regions",
+    "app.services.gemini",
+    "app.services.segformer",
+    "app.services.grounded_detect",
+    "app.services.detect_log",
+):
+    logging.getLogger(_name).setLevel(logging.INFO)
+
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",

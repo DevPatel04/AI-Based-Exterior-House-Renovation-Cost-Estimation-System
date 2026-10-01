@@ -190,55 +190,100 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
     import logging
 
+    from app.services.detect_log import format_summary, timed_step
     from app.services.segformer import _merge_region_lists, detect_segformer_regions
 
     logger = logging.getLogger(__name__)
     settings = get_settings()
     regions: list[dict] = []
     errors: list[str] = []
+    pipeline: list[str] = []
+
+    logger.info(
+        "DETECT pipeline begin image=%s hf=%s replicate=%s gemini_detect=%s gemini_refine=%s",
+        image_path.name,
+        bool((settings.hf_token or "").strip() and settings.enable_segformer),
+        bool((settings.replicate_api_token or "").strip()),
+        bool(settings.enable_gemini_region_detect and (settings.gemini_api_key or "").strip()),
+        bool(settings.enable_gemini_region_refine and (settings.gemini_api_key or "").strip()),
+    )
 
     if (settings.hf_token or "").strip() and settings.enable_segformer:
-        try:
-            regions = await detect_segformer_regions(image_path)
-        except StructureDetectError as exc:
-            errors.append(str(exc))
-            logger.error("HF SegFormer detect failed: %s", exc)
-        except Exception as exc:
-            errors.append(str(exc))
-            logger.exception("HF SegFormer detect crashed: %s", exc)
+        with timed_step(logger, "hf_segformer", image=image_path.name) as step:
+            try:
+                regions = await detect_segformer_regions(image_path)
+                step["summary"] = format_summary(regions)
+                pipeline.append("hf_segformer")
+            except StructureDetectError as exc:
+                errors.append(str(exc))
+                step["summary"] = f"failed: {exc}"
+                logger.error("HF SegFormer detect failed: %s", exc)
+            except Exception as exc:
+                errors.append(str(exc))
+                step["summary"] = f"crashed: {exc}"
+                logger.exception("HF SegFormer detect crashed: %s", exc)
+    elif not (settings.hf_token or "").strip():
+        logger.warning("DETECT skip hf_segformer reason=HF_TOKEN_missing")
+    else:
+        logger.warning("DETECT skip hf_segformer reason=ENABLE_SEGFORMER_false")
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
-    # Enrich whenever SegFormer is missing / wall-heavy (ADE often misses windows)
     need_enrich = (not regions) or non_wall < 2 or windows < 2
-    if need_enrich and (settings.replicate_api_token or "").strip():
-        try:
-            from app.services.grounded_detect import detect_grounded_regions
+    logger.info(
+        "DETECT enrich_check need=%s after_segformer %s",
+        need_enrich,
+        format_summary(regions),
+    )
 
-            # Keep SegFormer wall; only ask Replicate for openings when we already have a wall
-            openings_only = bool(regions) and windows < 2
-            grounded = await detect_grounded_regions(image_path, openings_only=openings_only)
-            regions = _merge_region_lists(regions, grounded) if regions else grounded
-        except StructureDetectError as exc:
-            errors.append(str(exc))
-            logger.error("Replicate detect failed: %s", exc)
-        except Exception as exc:
-            errors.append(str(exc))
-            logger.exception("Replicate detect crashed: %s", exc)
+    if need_enrich and (settings.replicate_api_token or "").strip():
+        openings_only = bool(regions) and windows < 2
+        with timed_step(
+            logger,
+            "replicate_enrich",
+            mode="openings_only" if openings_only else "full",
+            image=image_path.name,
+        ) as step:
+            try:
+                from app.services.grounded_detect import detect_grounded_regions
+
+                grounded = await detect_grounded_regions(image_path, openings_only=openings_only)
+                before = format_summary(regions)
+                regions = _merge_region_lists(regions, grounded) if regions else grounded
+                step["summary"] = f"before=({before}) after=({format_summary(regions)})"
+                pipeline.append("replicate_openings" if openings_only else "replicate_full")
+            except StructureDetectError as exc:
+                errors.append(str(exc))
+                logger.error("Replicate detect failed: %s", exc)
+            except Exception as exc:
+                errors.append(str(exc))
+                logger.exception("Replicate detect crashed: %s", exc)
+    elif need_enrich:
+        logger.warning("DETECT skip replicate_enrich reason=REPLICATE_API_TOKEN_missing")
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     if (not regions or non_wall < 2) and settings.enable_gemini_region_detect:
         if (settings.gemini_api_key or "").strip():
-            try:
-                gemini = await run_in_threadpool(_detect_structure_regions_gemini_sync, image_path)
-                if gemini:
-                    regions = _merge_region_lists(regions, gemini) if regions else gemini
-            except Exception as exc:
-                errors.append(str(exc))
-                logger.exception("Gemini vision detect crashed: %s", exc)
+            with timed_step(logger, "gemini_vision", image=image_path.name) as step:
+                try:
+                    gemini = await run_in_threadpool(_detect_structure_regions_gemini_sync, image_path)
+                    if gemini:
+                        regions = _merge_region_lists(regions, gemini) if regions else gemini
+                        step["summary"] = format_summary(regions)
+                        pipeline.append("gemini_vision")
+                    else:
+                        step["summary"] = "empty"
+                except Exception as exc:
+                    errors.append(str(exc))
+                    logger.exception("Gemini vision detect crashed: %s", exc)
 
     if not regions:
         primary = errors[0] if errors else ""
+        logger.error(
+            "DETECT pipeline empty errors=%s pipeline=%s",
+            errors,
+            pipeline,
+        )
         hint = (
             "Detect needs HF_TOKEN (SegFormer) and/or REPLICATE_API_TOKEN "
             "(Grounded-SAM + Grounding-DINO fallback). Or draw regions manually."
@@ -248,14 +293,19 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
         raise StructureDetectError(hint)
 
     if settings.enable_gemini_region_refine and (settings.gemini_api_key or "").strip():
-        try:
-            refined = await run_in_threadpool(_refine_regions_gemini_sync, image_path, regions)
-            if refined:
-                logger.info("Gemini refine: %s → %s regions", len(regions), len(refined))
-                return refined
-        except Exception as exc:
-            logger.warning("Gemini refine skipped: %s", exc)
+        with timed_step(logger, "gemini_refine", image=image_path.name) as step:
+            try:
+                refined = await run_in_threadpool(_refine_regions_gemini_sync, image_path, regions)
+                if refined:
+                    step["summary"] = f"{format_summary(regions)} → {format_summary(refined)}"
+                    pipeline.append("gemini_refine")
+                    logger.info("DETECT pipeline done steps=%s %s", " > ".join(pipeline), format_summary(refined))
+                    return refined
+                step["summary"] = "unchanged"
+            except Exception as exc:
+                logger.warning("Gemini refine skipped: %s", exc)
 
+    logger.info("DETECT pipeline done steps=%s %s", " > ".join(pipeline) or "none", format_summary(regions))
     return regions
 
 
