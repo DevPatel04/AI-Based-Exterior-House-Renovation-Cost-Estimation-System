@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     gemini_image_model: str = "gemini-2.5-flash-image"
     enable_gemini_hq: bool = False
+    # Off by default — saves free-tier quota (OpenCV quality check is enough for MVP)
+    enable_gemini_quality_notes: bool = False
+    enable_gemini_region_detect: bool = False
+    enable_gemini_region_refine: bool = False
 
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""

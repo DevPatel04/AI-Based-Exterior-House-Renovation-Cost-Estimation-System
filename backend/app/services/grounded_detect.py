@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import time
 from pathlib import Path
 
 import httpx
@@ -14,7 +15,7 @@ from PIL import Image
 
 from app.core.config import get_settings
 from app.models import RegionType
-from app.services.segformer import StructureDetectError, _mask_to_regions
+from app.services.segformer import StructureDetectError, _format_network_error, _mask_to_regions
 
 logger = logging.getLogger(__name__)
 
@@ -44,75 +45,93 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
     img.save(buf, format="PNG")
     data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-    # Combined prompt (Grounded-SAM style)
     prompt = " . ".join(p[0] for p in _PROMPT_MAP)
     model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
+    # Replicate allows Prefer wait between 1 and 60 only
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=120",
+        "Prefer": "wait=60",
     }
-    payload = {
-        "input": {
-            "image": data_uri,
-            "prompt": prompt,
-            "negative_prompt": "tree, person, car, sky, ground only",
-            "box_threshold": 0.25,
-            "text_threshold": 0.20,
-        }
-    }
-
-    with httpx.Client(timeout=180.0) as client:
-        resp = client.post(
-            f"https://api.replicate.com/v1/models/{model}/predictions",
-            headers=headers,
-            json=payload,
-        )
-        if resp.status_code >= 400:
-            # Alternate common grounded-sam schema
-            payload["input"] = {
+    payloads = [
+        {
+            "input": {
+                "image": data_uri,
+                "prompt": prompt,
+                "negative_prompt": "tree, person, car, sky, ground only",
+                "box_threshold": 0.25,
+                "text_threshold": 0.20,
+            }
+        },
+        {
+            "input": {
                 "image": data_uri,
                 "query": prompt,
             }
-            resp = client.post(
-                f"https://api.replicate.com/v1/models/{model}/predictions",
-                headers=headers,
-                json=payload,
-            )
-        if resp.status_code >= 400:
-            raise StructureDetectError(f"Replicate segmentation failed: {resp.status_code} {resp.text[:180]}")
+        },
+    ]
 
-        data = resp.json()
-        output = data.get("output")
-        get_url = (data.get("urls") or {}).get("get")
-        if not output and get_url:
-            import time
-
-            for _ in range(60):
-                time.sleep(2)
-                st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
-                body = st.json()
-                status = (body.get("status") or "").lower()
-                if status == "succeeded":
-                    output = body.get("output")
+    try:
+        with httpx.Client(timeout=180.0) as client:
+            data = None
+            last_status = None
+            last_body = ""
+            for payload in payloads:
+                try:
+                    resp = client.post(
+                        f"https://api.replicate.com/v1/models/{model}/predictions",
+                        headers=headers,
+                        json=payload,
+                    )
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+                    raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
+                last_status = resp.status_code
+                last_body = resp.text[:180]
+                if resp.status_code < 400:
+                    data = resp.json()
                     break
-                if status in {"failed", "canceled"}:
-                    raise StructureDetectError("Replicate Grounded-SAM prediction failed")
 
-        if not output:
-            raise StructureDetectError("Replicate Grounded-SAM returned empty output")
+            if data is None:
+                raise StructureDetectError(
+                    f"Replicate segmentation failed: {last_status} {last_body}"
+                )
 
-        regions = _parse_grounded_output(output, width, height, client)
-        if not regions:
-            raise StructureDetectError("Grounded-SAM found no facade parts in this photo")
-        return regions
+            output = data.get("output")
+            get_url = (data.get("urls") or {}).get("get")
+            status = (data.get("status") or "").lower()
+
+            if not output and get_url and status not in {"succeeded", "failed", "canceled"}:
+                for _ in range(60):
+                    time.sleep(2)
+                    try:
+                        st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
+                    except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+                        raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
+                    body = st.json()
+                    status = (body.get("status") or "").lower()
+                    if status == "succeeded":
+                        output = body.get("output")
+                        break
+                    if status in {"failed", "canceled"}:
+                        raise StructureDetectError("Replicate Grounded-SAM prediction failed")
+
+            if not output:
+                raise StructureDetectError("Replicate Grounded-SAM returned empty output")
+
+            regions = _parse_grounded_output(output, width, height, client)
+            if not regions:
+                raise StructureDetectError("Grounded-SAM found no facade parts in this photo")
+            return regions
+    except StructureDetectError:
+        raise
+    except Exception as exc:
+        raise StructureDetectError(_format_network_error(exc, "Replicate")) from exc
 
 
 def _parse_grounded_output(output, width: int, height: int, client: httpx.Client) -> list[dict]:
     """Best-effort parse of common Grounded-SAM Replicate outputs."""
     regions: list[dict] = []
 
-    # Case: list of mask URLs or dict with masks / detections
     masks = []
     labels = []
     if isinstance(output, dict):
@@ -120,7 +139,6 @@ def _parse_grounded_output(output, width: int, height: int, client: httpx.Client
         labels = output.get("labels") or output.get("tags") or output.get("phrases") or []
         if isinstance(masks, str):
             masks = [masks]
-        # Sometimes a single annotated image only — not useful for polygons
         detections = output.get("detections") or output.get("boxes") or []
         if detections and not masks:
             for det in detections:
@@ -132,7 +150,6 @@ def _parse_grounded_output(output, width: int, height: int, client: httpx.Client
                 if not rtype or not box or len(box) < 4:
                     continue
                 x0, y0, x1, y1 = [float(v) for v in box[:4]]
-                # normalize if absolute
                 if max(x0, y0, x1, y1) > 1.5:
                     x0, x1 = x0 / width, x1 / width
                     y0, y1 = y0 / height, y1 / height

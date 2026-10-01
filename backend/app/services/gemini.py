@@ -64,7 +64,7 @@ def _parse_gemini_regions(data: list | dict, source: str) -> list[dict]:
 
 def _gemini_quality_notes_sync(image_path: Path) -> str | None:
     settings = get_settings()
-    if not settings.gemini_api_key:
+    if not settings.gemini_api_key or not settings.enable_gemini_quality_notes:
         return None
     try:
         import google.generativeai as genai
@@ -90,7 +90,7 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
 def _detect_structure_regions_gemini_sync(image_path: Path) -> list[dict]:
     """Full structure detect from the photo via Gemini vision (no template boxes)."""
     settings = get_settings()
-    if not (settings.gemini_api_key or "").strip():
+    if not (settings.gemini_api_key or "").strip() or not settings.enable_gemini_region_detect:
         return []
 
     prompt = f"""
@@ -122,7 +122,11 @@ Separate each window; do not merge windows into one polygon.
 def _refine_regions_gemini_sync(image_path: Path, regions: list[dict]) -> list[dict]:
     """Adjust model draft regions using Gemini vision."""
     settings = get_settings()
-    if not (settings.gemini_api_key or "").strip() or not regions:
+    if (
+        not (settings.gemini_api_key or "").strip()
+        or not settings.enable_gemini_region_refine
+        or not regions
+    ):
         return regions
 
     seed = [
@@ -181,8 +185,8 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
 
       1) SegFormer masks (HF)
       2) Grounded-SAM (Replicate) when parts are missing
-      3) Gemini vision detect when still empty or wall-only
-      4) Optional Gemini refine
+      3) Gemini vision detect only if ENABLE_GEMINI_REGION_DETECT=true
+      4) Gemini refine only if ENABLE_GEMINI_REGION_REFINE=true
     """
     import logging
 
@@ -218,25 +222,29 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             logger.exception("Grounded-SAM detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-    if (not regions or non_wall < 2) and (settings.gemini_api_key or "").strip():
-        try:
-            gemini = await run_in_threadpool(_detect_structure_regions_gemini_sync, image_path)
-            if gemini:
-                regions = _merge_region_lists(regions, gemini) if regions else gemini
-        except Exception as exc:
-            errors.append(str(exc))
-            logger.exception("Gemini vision detect crashed: %s", exc)
+    if (not regions or non_wall < 2) and settings.enable_gemini_region_detect:
+        if (settings.gemini_api_key or "").strip():
+            try:
+                gemini = await run_in_threadpool(_detect_structure_regions_gemini_sync, image_path)
+                if gemini:
+                    regions = _merge_region_lists(regions, gemini) if regions else gemini
+            except Exception as exc:
+                errors.append(str(exc))
+                logger.exception("Gemini vision detect crashed: %s", exc)
 
     if not regions:
+        # Prefer the most actionable error (network / Replicate), then hint
+        primary = errors[0] if errors else ""
         hint = (
-            "Set HF_TOKEN (SegFormer), REPLICATE_API_TOKEN (Grounded-SAM), "
-            "or GEMINI_API_KEY (vision). Regions are never hardcoded — draw manually if needed."
+            "Detect needs outbound HTTPS to Hugging Face and/or Replicate. "
+            "Confirm HF_TOKEN and REPLICATE_API_TOKEN are on the backend service. "
+            "Or draw regions manually."
         )
-        if errors:
-            raise StructureDetectError(f"{errors[0]} {hint}")
+        if primary:
+            raise StructureDetectError(f"{primary} — {hint}")
         raise StructureDetectError(hint)
 
-    if (settings.gemini_api_key or "").strip():
+    if settings.enable_gemini_region_refine and (settings.gemini_api_key or "").strip():
         try:
             refined = await run_in_threadpool(_refine_regions_gemini_sync, image_path, regions)
             if refined:

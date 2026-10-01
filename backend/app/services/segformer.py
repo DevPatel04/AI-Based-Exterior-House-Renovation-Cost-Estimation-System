@@ -365,6 +365,21 @@ def _merge_region_lists(*lists: list[dict]) -> list[dict]:
     return walls + kept
 
 
+def _format_network_error(exc: Exception, service: str) -> str:
+    msg = str(exc)
+    low = msg.lower()
+    if "name or service not known" in low or "no address associated" in low or "temporary failure in name resolution" in low or "errno -5" in low or "errno -3" in low:
+        return (
+            f"Cannot reach {service} (DNS/network). "
+            "Railway backend must have outbound HTTPS. Redeploy the service, "
+            "confirm HF_TOKEN / REPLICATE_API_TOKEN are set on this backend service, "
+            "or draw regions manually."
+        )
+    if "timed out" in low or "timeout" in low:
+        return f"{service} timed out. Try again in a minute or draw regions manually."
+    return f"{service} error: {msg[:180]}"
+
+
 def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, token: str) -> list | dict | None:
     headers = {
         "Authorization": f"Bearer {token}",
@@ -372,15 +387,21 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
         "Accept": "application/json",
         "X-Wait-For-Model": "true",
     }
+    # Classic inference host first; router is newer and sometimes flaky
     urls = [
-        f"https://router.huggingface.co/hf-inference/models/{model}",
         f"https://api-inference.huggingface.co/models/{model}",
         f"https://api-inference.huggingface.co/pipeline/image-segmentation/{model}",
+        f"https://router.huggingface.co/hf-inference/models/{model}",
     ]
     last_err = None
     for url in urls:
         for attempt in range(3):
-            resp = client.post(url, headers=headers, content=body)
+            try:
+                resp = client.post(url, headers=headers, content=body)
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+                last_err = _format_network_error(exc, "Hugging Face")
+                logger.warning("HF connect failed %s: %s", url, exc)
+                break
             if resp.status_code == 503:
                 time.sleep(5 + attempt * 5)
                 continue
@@ -401,6 +422,9 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
             return data
     if last_err:
         logger.warning("HF SegFormer failed for %s: %s", model, last_err)
+        # Propagate network errors so the API can show them clearly
+        if "Cannot reach Hugging Face" in last_err or "timed out" in last_err.lower():
+            raise StructureDetectError(last_err)
     return None
 
 
@@ -437,9 +461,14 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
             models.append(m)
 
     collected: list[list[dict]] = []
+    network_err: str | None = None
     with httpx.Client(timeout=180.0) as client:
         for model in models:
-            data = _call_hf_image_segmentation(client, model, body, token)
+            try:
+                data = _call_hf_image_segmentation(client, model, body, token)
+            except StructureDetectError as exc:
+                network_err = str(exc)
+                continue
             if data is None:
                 continue
             regions = _parse_hf_segmentation(data, width, height)
@@ -453,6 +482,8 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
                 collected.append(regions)
 
     if not collected:
+        if network_err:
+            raise StructureDetectError(network_err)
         raise StructureDetectError(
             "SegFormer returned no facade regions for this photo. "
             "Try a clearer front-facing exterior, or draw regions manually."

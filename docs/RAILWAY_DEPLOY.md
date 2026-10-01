@@ -54,7 +54,10 @@ git push origin develop
 | `ENVIRONMENT`           | `production`                                                   |
 | `CORS_ORIGINS`          | your frontend URL, e.g. `https://frontend-xxxx.up.railway.app` |
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
-| `GEMINI_API_KEY`        | recommended — vision detect, refine, quality notes (no hardcoded regions) |
+| `GEMINI_API_KEY`        | optional — only if you enable flags below (saves free-tier quota) |
+| `ENABLE_GEMINI_QUALITY_NOTES` | `false` — upload tips use OpenCV only when off          |
+| `ENABLE_GEMINI_REGION_DETECT` | `false` — use HF_TOKEN + REPLICATE for detect instead |
+| `ENABLE_GEMINI_REGION_REFINE` | `false` — extra Gemini call per detect when off       |
 | `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
 | `CLOUDFLARE_API_TOKEN`  | optional                                                       |
 | `ENABLE_GEMINI_HQ`      | `false`                                                        |

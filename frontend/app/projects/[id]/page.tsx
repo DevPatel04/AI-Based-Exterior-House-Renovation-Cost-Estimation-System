@@ -675,7 +675,7 @@ export default function ProjectWorkspacePage() {
           {primary ? (
             <>
               {regions.length === 0 && (
-                <Alert tone="info">No regions yet. Click “Detect with AI” (SegFormer / Gemini / Grounded-SAM). Set HF_TOKEN or GEMINI_API_KEY on the backend, or draw regions manually.</Alert>
+                <Alert tone="info">No regions yet. Click “Detect with AI” (SegFormer + Grounded-SAM). Set HF_TOKEN and/or REPLICATE_API_TOKEN on the backend, or draw regions manually.</Alert>
               )}
               <RegionCanvas projectId={projectId} imageId={primary.id} regions={regions} onChange={setRegions} />
             </>
