@@ -135,6 +135,7 @@ async def _cloudflare_img2img(
     """Cloudflare Workers AI — free daily Neurons. Prefer dedicated img2img model."""
     settings = get_settings()
     model = (settings.cloudflare_image_model or _DEFAULT_CF_IMG2IMG).strip()
+    # Lightning is text-to-image oriented; don't use it as the primary img2img model.
     if "lightning" in model.lower() and "img2img" not in model.lower():
         model = _DEFAULT_CF_IMG2IMG
         logger.info("REDESIGN cloudflare using img2img model instead of lightning: %s", model)
@@ -145,68 +146,114 @@ async def _cloudflare_img2img(
         return None, "CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN empty"
 
     try:
-        img = Image.open(source_path).convert("RGB")
-        img.thumbnail((768, 768))
         import io
+
+        img = Image.open(source_path).convert("RGB")
+        # SD 1.5 img2img is happiest near 512
+        img.thumbnail((512, 512))
+        # Some CF runtimes prefer exact multiples of 8
+        w, h = img.size
+        w8, h8 = max(256, (w // 8) * 8), max(256, (h // 8) * 8)
+        if (w8, h8) != (w, h):
+            img = img.resize((w8, h8), Image.Resampling.LANCZOS)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        image_b64 = base64.b64encode(buf.getvalue()).decode()
+        png_bytes = buf.getvalue()
+        image_b64 = base64.b64encode(png_bytes).decode()
+        # Flat uint8 RGB list (documented CF img2img `image` input)
+        flat_rgb = list(img.tobytes())
 
         strength = 0.62 if hq_mode else 0.52
         num_steps = min(20 if hq_mode else 16, 20)
-        payload = {
+        negative = (
+            "blurry, distorted windows, warped roof, extra floors, people, text, "
+            "watermark, cartoon, low quality, different building layout"
+        )
+        base_fields = {
             "prompt": prompt,
-            "negative_prompt": (
-                "blurry, distorted windows, warped roof, extra floors, people, text, "
-                "watermark, cartoon, low quality, different building layout"
-            ),
-            "image_b64": image_b64,
+            "negative_prompt": negative,
             "strength": strength,
             "num_steps": num_steps,
             "guidance": 7.5,
+            "width": img.size[0],
+            "height": img.size[1],
         }
+        # Try several valid CF shapes — models differ on `image_b64` vs `image`
+        payloads = [
+            {**base_fields, "image_b64": image_b64},
+            {**base_fields, "image": flat_rgb},
+            {
+                "prompt": prompt,
+                "negative_prompt": negative,
+                "image_b64": image_b64,
+                "strength": strength,
+                "num_steps": num_steps,
+            },
+        ]
+        # Img2img-capable models only (do NOT send image_* to lightning — it rejects them)
+        models = [
+            model,
+            "@cf/runwayml/stable-diffusion-v1-5-img2img",
+            "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+        ]
+        # de-dupe preserve order
+        seen: set[str] = set()
+        models = [m for m in models if not (m in seen or seen.add(m))]
+
         headers = {"Authorization": f"Bearer {token}"}
         logger.info(
-            "REDESIGN cloudflare_call model=%s strength=%s steps=%s size=%sx%s",
-            model,
-            strength,
-            num_steps,
+            "REDESIGN cloudflare_call models=%s size=%sx%s steps=%s",
+            models,
             img.size[0],
             img.size[1],
+            num_steps,
         )
-        last_err: str | None = None
+        errors: list[str] = []
         async with httpx.AsyncClient(timeout=180.0) as client:
-            for try_model in (model, "@cf/bytedance/stable-diffusion-xl-lightning"):
+            for try_model in models:
                 try_url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{try_model}"
-                resp = await client.post(try_url, headers=headers, json=payload)
-                if resp.status_code >= 400:
-                    last_err = f"HTTP {resp.status_code} model={try_model}: {resp.text[:160]}"
-                    logger.warning("REDESIGN cloudflare %s", last_err)
-                    continue
-                content_type = resp.headers.get("content-type", "")
-                root = ensure_upload_dirs()
-                name = f"{uuid.uuid4().hex}.png"
-                dest = root / "redesigns" / name
-                if "image" in content_type:
-                    dest.write_bytes(resp.content)
-                    return f"redesigns/{name}", None
-                data = resp.json()
-                if data.get("success") is False:
-                    last_err = f"API error model={try_model}: {str(data.get('errors') or data)[:160]}"
-                    continue
-                result = data.get("result")
-                if isinstance(result, str):
-                    dest.write_bytes(base64.b64decode(result))
-                    return f"redesigns/{name}", None
-                if isinstance(result, dict) and "image" in result:
-                    dest.write_bytes(base64.b64decode(result["image"]))
-                    return f"redesigns/{name}", None
-                if isinstance(result, dict) and "image_b64" in result:
-                    dest.write_bytes(base64.b64decode(result["image_b64"]))
-                    return f"redesigns/{name}", None
-                last_err = f"unexpected JSON model={try_model} keys={list(data.keys())[:8]}"
-            return None, last_err or "request failed"
+                for i, payload in enumerate(payloads):
+                    resp = await client.post(try_url, headers=headers, json=payload)
+                    label = f"model={try_model} payload={i}"
+                    if resp.status_code >= 400:
+                        err = f"HTTP {resp.status_code} {label}: {resp.text[:140]}"
+                        logger.warning("REDESIGN cloudflare %s", err)
+                        errors.append(err)
+                        continue
+                    content_type = resp.headers.get("content-type", "")
+                    root = ensure_upload_dirs()
+                    name = f"{uuid.uuid4().hex}.png"
+                    dest = root / "redesigns" / name
+                    if "image" in content_type:
+                        dest.write_bytes(resp.content)
+                        logger.info("REDESIGN cloudflare ok %s", label)
+                        return f"redesigns/{name}", None
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        errors.append(f"non-json {label}")
+                        continue
+                    if data.get("success") is False:
+                        err = f"API error {label}: {str(data.get('errors') or data)[:140]}"
+                        errors.append(err)
+                        continue
+                    result = data.get("result")
+                    raw: bytes | None = None
+                    if isinstance(result, str):
+                        raw = base64.b64decode(result)
+                    elif isinstance(result, dict):
+                        for key in ("image", "image_b64", "b64_json"):
+                            if key in result and isinstance(result[key], str):
+                                val = result[key]
+                                raw = base64.b64decode(val.split(",", 1)[-1] if "," in val else val)
+                                break
+                    if raw:
+                        dest.write_bytes(raw)
+                        logger.info("REDESIGN cloudflare ok %s", label)
+                        return f"redesigns/{name}", None
+                    errors.append(f"unexpected result {label}: {str(type(result))}")
+            return None, " | ".join(errors[:3]) if errors else "request failed"
     except Exception as exc:
         logger.warning("REDESIGN cloudflare exception: %s", exc)
         return None, str(exc)[:180]
