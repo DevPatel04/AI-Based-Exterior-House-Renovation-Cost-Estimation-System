@@ -191,8 +191,9 @@ async def visualize(
             detail=(
                 "AI redesign unavailable — not using the green local preview. "
                 + " | ".join(exc.notes)
-                + " Fix REPLICATE_API_TOKEN (https://replicate.com/account/api-tokens), "
-                "or set FAL_KEY / Cloudflare keys, or ALLOW_LOCAL_REDESIGN_FALLBACK=true for demo mode."
+                + " Fix free redesign: set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
+                "(Workers AI REST API — free daily Neurons), or REPLICATE_API_TOKEN, "
+                "or ALLOW_LOCAL_REDESIGN_FALLBACK=true for demo mode only."
             ),
         ) from exc
     design.redesign_path = rel

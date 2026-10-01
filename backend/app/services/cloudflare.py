@@ -12,6 +12,9 @@ from app.services.storage import ensure_upload_dirs
 
 logger = logging.getLogger(__name__)
 
+# Free-tier friendly Workers AI img2img (10k Neurons/day on Cloudflare free plan)
+_DEFAULT_CF_IMG2IMG = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+
 
 async def generate_redesign(
     source_path: Path,
@@ -21,35 +24,43 @@ async def generate_redesign(
     """
     Returns (relative_path, engine_used, failure_notes).
 
-    Order:
-      1) Gemini HQ (only when hq_mode + keys)
-      2) Replicate SDXL ControlNet (REPLICATE_API_TOKEN)
-      3) fal.ai ControlNet Canny (optional FAL_KEY)
-      4) Cloudflare Workers AI img2img
-      5) Local PIL fallback (only if ALLOW_LOCAL_REDESIGN_FALLBACK=true)
+    Free-first order (no Gemini required):
+      1) Cloudflare Workers AI Stable Diffusion img2img (free daily Neurons)
+      2) Replicate SDXL ControlNet (free trial credits — best facade lock)
+      3) fal.ai ControlNet (optional paid/credits)
+      4) Hugging Face image-to-image via HF_TOKEN monthly free credits
+      5) Gemini HQ only if explicitly enabled (paid / quota)
+      6) Local PIL fallback only if ALLOW_LOCAL_REDESIGN_FALLBACK=true
     """
     settings = get_settings()
     notes: list[str] = []
     logger.info(
-        "REDESIGN begin hq=%s replicate=%s fal=%s cloudflare=%s local_ok=%s",
+        "REDESIGN begin hq=%s cloudflare=%s replicate=%s fal=%s hf=%s gemini_hq=%s local_ok=%s",
         hq_mode,
+        bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
         bool((settings.replicate_api_token or "").strip() and settings.enable_replicate_controlnet),
         bool((settings.fal_key or "").strip() and settings.enable_fal_controlnet),
-        bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
-        bool(getattr(settings, "allow_local_redesign_fallback", False)),
+        bool((settings.hf_token or "").strip()),
+        bool(hq_mode and settings.enable_gemini_hq and settings.gemini_api_key),
+        bool(settings.allow_local_redesign_fallback),
     )
 
-    if hq_mode and settings.enable_gemini_hq and settings.gemini_api_key:
-        logger.info("REDESIGN try gemini_hq")
-        path = await _gemini_hq(source_path, prompt)
+    # 1) Cloudflare — primary free path
+    if settings.cloudflare_account_id and settings.cloudflare_api_token:
+        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+        path = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
         if path:
-            logger.info("REDESIGN ok engine=gemini_hq path=%s", path)
-            return path, "gemini_hq", notes
-        notes.append("gemini_hq: no image in response")
-        logger.warning("REDESIGN fail gemini_hq")
-    elif hq_mode:
-        notes.append("gemini_hq: skipped (ENABLE_GEMINI_HQ or GEMINI_API_KEY missing)")
+            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
+            return path, "cloudflare", notes
+        notes.append("cloudflare: request failed")
+        logger.warning("REDESIGN fail cloudflare")
+    else:
+        notes.append(
+            "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
+            "(free: https://developers.cloudflare.com/workers-ai/get-started/rest-api/)"
+        )
 
+    # 2) Replicate ControlNet — better geometry when free trial credits exist
     if settings.enable_replicate_controlnet and (settings.replicate_api_token or "").strip():
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
 
@@ -63,6 +74,7 @@ async def generate_redesign(
     else:
         notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
+    # 3) fal (optional)
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
 
@@ -76,16 +88,29 @@ async def generate_redesign(
     else:
         notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
 
-    if settings.cloudflare_account_id and settings.cloudflare_api_token:
-        logger.info("REDESIGN try cloudflare")
-        path = await _cloudflare_img2img(source_path, prompt)
+    # 4) Hugging Face image-to-image (small free monthly credits on HF_TOKEN)
+    if (settings.hf_token or "").strip() and settings.enable_hf_img2img:
+        from app.services.hf_img2img import generate_hf_img2img_redesign
+
+        logger.info("REDESIGN try hf_img2img")
+        path, err = await generate_hf_img2img_redesign(source_path, prompt, hq_mode=hq_mode)
         if path:
-            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-            return path, "cloudflare", notes
-        notes.append("cloudflare: request failed")
-        logger.warning("REDESIGN fail cloudflare")
+            logger.info("REDESIGN ok engine=hf_img2img path=%s", path)
+            return path, "hf_img2img", notes
+        notes.append(f"hf_img2img: {err or 'failed'}")
+        logger.warning("REDESIGN fail hf_img2img err=%s", err)
     else:
-        notes.append("cloudflare: skipped (CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN missing)")
+        notes.append("hf_img2img: skipped (HF_TOKEN missing or ENABLE_HF_IMG2IMG=false)")
+
+    # 5) Optional Gemini HQ (not required — usually paid/quota)
+    if hq_mode and settings.enable_gemini_hq and settings.gemini_api_key:
+        logger.info("REDESIGN try gemini_hq")
+        path = await _gemini_hq(source_path, prompt)
+        if path:
+            logger.info("REDESIGN ok engine=gemini_hq path=%s", path)
+            return path, "gemini_hq", notes
+        notes.append("gemini_hq: no image in response")
+        logger.warning("REDESIGN fail gemini_hq")
 
     if settings.allow_local_redesign_fallback:
         path = _local_fallback_redesign(source_path, prompt)
@@ -104,33 +129,76 @@ class RedesignUnavailableError(Exception):
         super().__init__("; ".join(notes) if notes else "No redesign engine available")
 
 
-async def _cloudflare_img2img(source_path: Path, prompt: str) -> str | None:
+async def _cloudflare_img2img(source_path: Path, prompt: str, hq_mode: bool = False) -> str | None:
+    """Cloudflare Workers AI — free daily Neurons. Prefer dedicated img2img model."""
     settings = get_settings()
+    model = (settings.cloudflare_image_model or _DEFAULT_CF_IMG2IMG).strip()
+    # If someone still has lightning (txt2img-oriented), prefer real img2img
+    if "lightning" in model.lower() and "img2img" not in model.lower():
+        model = _DEFAULT_CF_IMG2IMG
+        logger.info("REDESIGN cloudflare using img2img model instead of lightning: %s", model)
+
     url = (
         f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}"
-        f"/ai/run/{settings.cloudflare_image_model}"
+        f"/ai/run/{model}"
     )
     try:
         img = Image.open(source_path).convert("RGB")
-        img.thumbnail((1024, 1024))
+        # SD 1.5 works best around 512; keep aspect
+        img.thumbnail((768, 768))
         import io
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         image_b64 = base64.b64encode(buf.getvalue()).decode()
 
+        # HQ = more steps / slightly stronger edit within free Neurons budget
+        strength = 0.62 if hq_mode else 0.52
+        num_steps = 20 if hq_mode else 16
         payload = {
             "prompt": prompt,
+            "negative_prompt": (
+                "blurry, distorted windows, warped roof, extra floors, people, text, "
+                "watermark, cartoon, low quality, different building layout"
+            ),
             "image_b64": image_b64,
-            "strength": 0.45,
-            "num_steps": 8,
+            "strength": strength,
+            "num_steps": num_steps,
+            "guidance": 7.5,
         }
         headers = {"Authorization": f"Bearer {settings.cloudflare_api_token}"}
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        logger.info(
+            "REDESIGN cloudflare_call model=%s strength=%s steps=%s size=%sx%s",
+            model,
+            strength,
+            num_steps,
+            img.size[0],
+            img.size[1],
+        )
+        async with httpx.AsyncClient(timeout=180.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
-                logger.warning("REDESIGN cloudflare http=%s body=%s", resp.status_code, resp.text[:200])
-                return None
+                logger.warning(
+                    "REDESIGN cloudflare http=%s body=%s — retry lightning model",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                alt_model = "@cf/bytedance/stable-diffusion-xl-lightning"
+                if model != alt_model and resp.status_code in (400, 404):
+                    alt_url = (
+                        f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}"
+                        f"/ai/run/{alt_model}"
+                    )
+                    resp = await client.post(alt_url, headers=headers, json=payload)
+                    if resp.status_code >= 400:
+                        logger.warning(
+                            "REDESIGN cloudflare alt http=%s body=%s",
+                            resp.status_code,
+                            resp.text[:200],
+                        )
+                        return None
+                else:
+                    return None
             content_type = resp.headers.get("content-type", "")
             root = ensure_upload_dirs()
             name = f"{uuid.uuid4().hex}.png"
@@ -144,7 +212,10 @@ async def _cloudflare_img2img(source_path: Path, prompt: str) -> str | None:
                     dest.write_bytes(base64.b64decode(result))
                 elif isinstance(result, dict) and "image" in result:
                     dest.write_bytes(base64.b64decode(result["image"]))
+                elif isinstance(result, dict) and "image_b64" in result:
+                    dest.write_bytes(base64.b64decode(result["image_b64"]))
                 else:
+                    logger.warning("REDESIGN cloudflare unexpected JSON keys=%s", list(data.keys())[:10])
                     return None
             return f"redesigns/{name}"
     except Exception as exc:
@@ -183,7 +254,7 @@ async def _gemini_hq(source_path: Path, prompt: str) -> str | None:
 
 
 def _local_fallback_redesign(source_path: Path, prompt: str) -> str:
-    """Deterministic, prompt-dependent visual change so Design A vs B differ without AI keys."""
+    """Deterministic demo overlay — not a real AI redesign."""
     root = ensure_upload_dirs()
     name = f"{uuid.uuid4().hex}.jpg"
     dest = root / "redesigns" / name

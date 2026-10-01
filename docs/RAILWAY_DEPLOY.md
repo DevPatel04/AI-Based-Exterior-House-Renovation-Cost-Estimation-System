@@ -54,21 +54,24 @@ git push origin develop
 | `ENVIRONMENT`           | `production`                                                   |
 | `CORS_ORIGINS`          | your frontend URL, e.g. `https://frontend-xxxx.up.railway.app` |
 | `UPLOAD_DIR`            | `/data/uploads`                                                |
-| `GEMINI_API_KEY`        | optional                                                       |
-| `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
-| `CLOUDFLARE_API_TOKEN`  | optional                                                       |
-| `ENABLE_GEMINI_HQ`      | `false`                                                        |
-| `HF_TOKEN`              | **required for Detect** — [Hugging Face](https://huggingface.co/settings/tokens) SegFormer masks |
+| `GEMINI_API_KEY`        | optional — **not required** for redesign                       |
+| `ENABLE_GEMINI_HQ`      | `false` (leave off unless you have Gemini image quota)         |
+| `CLOUDFLARE_ACCOUNT_ID` | **recommended free redesign** — Cloudflare account id          |
+| `CLOUDFLARE_API_TOKEN`  | **recommended free redesign** — Workers AI REST API token      |
+| `CLOUDFLARE_IMAGE_MODEL`| default `@cf/runwayml/stable-diffusion-v1-5-img2img`           |
+| `HF_TOKEN`              | **required for Detect** — also optional redesign backup        |
+| `ENABLE_HF_IMG2IMG`     | `true` — uses HF free monthly credits as redesign backup       |
 | `ENABLE_SEGFORMER`      | `true`                                                         |
 | `SEGFORMER_MODEL`       | default `nvidia/segformer-b0-finetuned-ade-512-512`            |
 | `ENABLE_DEPTH_SCALE`    | `true` (Depth Anything V2 scale when `HF_TOKEN` / Replicate set) |
-| `REPLICATE_API_TOKEN`   | optional — ControlNet redesign + Grounded-SAM detect backup    |
-| `ENABLE_REPLICATE_CONTROLNET` | `true` (preferred ControlNet path when token set)        |
+| `REPLICATE_API_TOKEN`   | optional — better ControlNet redesign + detect openings backup |
+| `ENABLE_REPLICATE_CONTROLNET` | `true`                                                   |
 | `REPLICATE_CONTROLNET_MODEL` | default `lucataco/sdxl-controlnet`                          |
 | `REPLICATE_SEG_MODEL`   | default `schananas/grounded_sam` (detect backup)               |
 | `FAL_KEY`               | optional — only if you have fal credits                        |
-| `ENABLE_FAL_CONTROLNET` | `true` (used when `FAL_KEY` is set; after Replicate)           |
+| `ENABLE_FAL_CONTROLNET` | `true`                                                         |
 | `FAL_CONTROLNET_MODEL`  | default `fal-ai/fast-sdxl-controlnet-canny`                    |
+| `ALLOW_LOCAL_REDESIGN_FALLBACK` | `false` — avoid green demo overlay                    |
 
 
 1. **Volume (important):** local uploads are wiped without a volume

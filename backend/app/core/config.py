@@ -41,7 +41,12 @@ class Settings(BaseSettings):
 
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""
-    cloudflare_image_model: str = "@cf/bytedance/stable-diffusion-xl-lightning"
+    # Free Workers AI img2img (10k Neurons/day). Prefer img2img over lightning txt2img.
+    cloudflare_image_model: str = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+
+    # Optional Hugging Face image-to-image (uses HF_TOKEN free monthly credits)
+    enable_hf_img2img: bool = True
+    hf_img2img_model: str = "stabilityai/stable-diffusion-xl-base-1.0"
 
     # Optional fal.ai ControlNet (cloud GPU — no local GPU required)
     fal_key: str = ""

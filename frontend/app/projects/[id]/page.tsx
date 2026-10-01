@@ -873,12 +873,17 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Uses Replicate ControlNet when REPLICATE_API_TOKEN is set; otherwise fal / Cloudflare. A green “Local preview” means AI keys failed.`
+              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Free path: Cloudflare Workers AI img2img (set CLOUDFLARE_* keys). Optional: Replicate ControlNet for stronger facade lock.`
               : "Generate a redesigned view of your house using your selected materials."
           }
           actions={
             <>
-              <button className="btn-outline" onClick={() => runVisualize(true)} disabled={busy} title="Optional higher-quality render via Gemini">
+              <button
+                className="btn-outline"
+                onClick={() => runVisualize(true)}
+                disabled={busy}
+                title="Stronger free render (more Cloudflare steps) — Gemini not required"
+              >
                 <Icon name="sparkles" /> HQ render
               </button>
               <button className="btn-primary" onClick={() => runVisualize(false)} disabled={busy}>
@@ -914,8 +919,11 @@ export default function ProjectWorkspacePage() {
                 {activeDesign?.prompt_used?.includes("[gemini_hq]") && (
                   <Badge tone="violet">Gemini HQ</Badge>
                 )}
+                {activeDesign?.prompt_used?.includes("[hf_img2img]") && (
+                  <Badge tone="neutral">Hugging Face</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[cloudflare]") && (
-                  <Badge tone="neutral">Cloudflare</Badge>
+                  <Badge tone="brand">Cloudflare (free)</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[local_fallback]") && (
                   <Badge tone="warning">Local preview (not AI)</Badge>
