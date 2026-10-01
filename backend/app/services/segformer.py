@@ -1,8 +1,10 @@
-"""SegFormer facade structure detection (Hugging Face Inference).
+"""SegFormer facade structure detection (Hugging Face Inference Providers).
+
+Legacy api-inference.huggingface.co is retired. We call router.huggingface.co only.
 
 ADE SegFormer often labels the whole house as one "building" mask.
 We therefore:
-  1) Run CMP facade + ADE models and merge labels
+  1) Run ADE (+ Cityscapes) SegFormer and merge labels
   2) Punch opening masks out of the wall so windows stay separate
   3) Caller may enrich with Replicate Grounded-SAM / DINO when openings are thin
 """
@@ -428,35 +430,51 @@ def _format_network_error(exc: Exception, service: str) -> str:
 
 
 def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, token: str) -> list | dict | None:
-    headers = {
+    """Call Hugging Face Inference Providers (router). Legacy api-inference is retired."""
+    headers_raw = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "image/jpeg",
         "Accept": "application/json",
         "X-Wait-For-Model": "true",
     }
-    # Classic inference host first; router is newer and sometimes flaky
-    urls = [
-        f"https://api-inference.huggingface.co/models/{model}",
-        f"https://api-inference.huggingface.co/pipeline/image-segmentation/{model}",
-        f"https://router.huggingface.co/hf-inference/models/{model}",
+    # Legacy api-inference.huggingface.co is gone (DNS/410). Router only.
+    base = f"https://router.huggingface.co/hf-inference/models/{model}"
+    payloads: list[tuple[str, dict, bytes | dict]] = [
+        ("bytes", headers_raw, body),
+        (
+            "json_b64",
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Wait-For-Model": "true",
+            },
+            {
+                "inputs": base64.b64encode(body).decode("ascii"),
+                "parameters": {"threshold": 0.3},
+            },
+        ),
     ]
     last_err = None
     t0 = time.perf_counter()
     logger.info("DETECT hf_call start model=%s bytes=%s", model, len(body))
-    for url in urls:
-        for attempt in range(3):
+    for attempt in range(3):
+        for kind, headers, payload in payloads:
             try:
-                resp = client.post(url, headers=headers, content=body)
+                if kind == "bytes":
+                    resp = client.post(base, headers=headers, content=payload)  # type: ignore[arg-type]
+                else:
+                    resp = client.post(base, headers=headers, json=payload)
             except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
                 last_err = _format_network_error(exc, "Hugging Face")
                 logger.warning(
-                    "DETECT hf_call connect_fail model=%s url=%s attempt=%s err=%s",
+                    "DETECT hf_call connect_fail model=%s kind=%s attempt=%s err=%s",
                     model,
-                    url,
+                    kind,
                     attempt + 1,
                     exc,
                 )
-                break
+                continue
             if resp.status_code == 503:
                 logger.info(
                     "DETECT hf_call model_loading model=%s attempt=%s status=503",
@@ -464,40 +482,59 @@ def _call_hf_image_segmentation(client: httpx.Client, model: str, body: bytes, t
                     attempt + 1,
                 )
                 time.sleep(5 + attempt * 5)
-                continue
+                break  # retry outer attempt
+            if resp.status_code == 410:
+                last_err = f"410 deprecated: {resp.text[:180]}"
+                logger.warning(
+                    "DETECT hf_call deprecated model=%s body=%s",
+                    model,
+                    resp.text[:180],
+                )
+                # Model removed from hf-inference catalog — do not retry other payloads
+                return None
             if resp.status_code >= 400:
                 last_err = f"{resp.status_code}: {resp.text[:200]}"
                 logger.warning(
-                    "DETECT hf_call http_error model=%s status=%s body=%s",
+                    "DETECT hf_call http_error model=%s kind=%s status=%s body=%s",
                     model,
+                    kind,
                     resp.status_code,
                     resp.text[:200],
                 )
-                break
+                continue
             try:
                 data = resp.json()
             except Exception as exc:
                 last_err = str(exc)
-                break
+                continue
             if isinstance(data, dict) and data.get("error"):
                 last_err = str(data.get("error"))
-                if "loading" in last_err.lower():
+                low = last_err.lower()
+                if "loading" in low:
                     logger.info("DETECT hf_call still_loading model=%s err=%s", model, last_err)
                     time.sleep(8)
-                    continue
-                break
+                    break
+                if "deprecated" in low or "no longer supported" in low:
+                    logger.warning("DETECT hf_call deprecated model=%s err=%s", model, last_err)
+                    return None
+                continue
             ms = int((time.perf_counter() - t0) * 1000)
             logger.info(
-                "DETECT hf_call ok model=%s ms=%s segments=%s",
+                "DETECT hf_call ok model=%s kind=%s ms=%s segments=%s",
                 model,
+                kind,
                 ms,
                 len(data) if isinstance(data, list) else "dict",
             )
             return data
+        else:
+            continue
+        # only reached when inner break (503/loading retry)
+        continue
+
     ms = int((time.perf_counter() - t0) * 1000)
     if last_err:
         logger.warning("DETECT hf_call fail model=%s ms=%s err=%s", model, ms, last_err)
-        # Propagate network errors so the API can show them clearly
         if "Cannot reach Hugging Face" in last_err or "timed out" in last_err.lower():
             raise StructureDetectError(last_err)
     return None
@@ -525,12 +562,13 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         raise StructureDetectError(f"Could not read project image: {exc}") from exc
 
     primary = (settings.segformer_model or "nvidia/segformer-b0-finetuned-ade-512-512").strip()
-    # CMP first for windows/doors/balcony; ADE for solid facade wall
+    # CMP facade model was removed from HF Inference Providers (410 Gone).
+    # ADE = building/windowpane/door; Cityscapes = building/wall (extra facade mass).
     models: list[str] = []
     for m in (
-        "Xpitfire/segformer-finetuned-segments-cmp-facade",
         primary,
         "nvidia/segformer-b0-finetuned-ade-512-512",
+        "nvidia/segformer-b0-finetuned-cityscapes-1024-1024",
     ):
         if m and m not in models:
             models.append(m)
@@ -572,8 +610,9 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
         if network_err:
             raise StructureDetectError(network_err)
         raise StructureDetectError(
-            "SegFormer returned no facade regions for this photo. "
-            "Try a clearer front-facing exterior, or draw regions manually."
+            "SegFormer returned no facade regions (HF Inference Providers). "
+            "Pipeline will try Replicate if REPLICATE_API_TOKEN is set. "
+            "Or draw regions manually."
         )
 
     merged = _merge_region_lists(*collected)
