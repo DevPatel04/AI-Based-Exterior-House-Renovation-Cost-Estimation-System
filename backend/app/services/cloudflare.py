@@ -12,8 +12,9 @@ from app.services.storage import ensure_upload_dirs
 
 logger = logging.getLogger(__name__)
 
-# Free-tier friendly Workers AI img2img (10k Neurons/day on Cloudflare free plan)
-_DEFAULT_CF_IMG2IMG = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+# SDXL Lightning works on most free Workers AI accounts.
+# Runway SD1.5 img2img often returns 403 "account is not allowed".
+_DEFAULT_CF_MODEL = "@cf/bytedance/stable-diffusion-xl-lightning"
 
 
 async def generate_redesign(
@@ -25,11 +26,11 @@ async def generate_redesign(
     Returns (relative_path, engine_used, failure_notes).
 
     Free-first order (no Gemini required):
-      1) Cloudflare Workers AI Stable Diffusion img2img (free daily Neurons)
-      2) Replicate SDXL ControlNet (free trial credits — best facade lock)
-      3) fal.ai ControlNet (optional paid/credits)
-      4) Hugging Face image-to-image via HF_TOKEN monthly free credits
-      5) Gemini HQ only if explicitly enabled (paid / quota)
+      1) Cloudflare Workers AI (SDXL Lightning / DreamShaper)
+      2) Replicate SDXL ControlNet
+      3) fal.ai ControlNet
+      4) Hugging Face image-to-image (optional)
+      5) Gemini HQ only if explicitly enabled
       6) Local PIL fallback only if ALLOW_LOCAL_REDESIGN_FALLBACK=true
     """
     settings = get_settings()
@@ -40,12 +41,11 @@ async def generate_redesign(
         bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
         bool((settings.replicate_api_token or "").strip() and settings.enable_replicate_controlnet),
         bool((settings.fal_key or "").strip() and settings.enable_fal_controlnet),
-        bool((settings.hf_token or "").strip()),
+        bool((settings.hf_token or "").strip() and settings.enable_hf_img2img),
         bool(hq_mode and settings.enable_gemini_hq and settings.gemini_api_key),
         bool(settings.allow_local_redesign_fallback),
     )
 
-    # 1) Cloudflare — primary free path
     if settings.cloudflare_account_id and settings.cloudflare_api_token:
         logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
         path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
@@ -60,7 +60,6 @@ async def generate_redesign(
             "(free: https://developers.cloudflare.com/workers-ai/get-started/rest-api/)"
         )
 
-    # 2) Replicate ControlNet — better geometry when free trial credits exist
     if settings.enable_replicate_controlnet and (settings.replicate_api_token or "").strip():
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
 
@@ -74,7 +73,6 @@ async def generate_redesign(
     else:
         notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
-    # 3) fal (optional)
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
 
@@ -83,12 +81,11 @@ async def generate_redesign(
         if path:
             logger.info("REDESIGN ok engine=fal_controlnet path=%s", path)
             return path, "fal_controlnet", notes
-        notes.append("fal_controlnet: request failed")
+        notes.append("fal_controlnet: request failed (403/credits)")
         logger.warning("REDESIGN fail fal_controlnet")
     else:
         notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
 
-    # 4) Hugging Face image-to-image (small free monthly credits on HF_TOKEN)
     if (settings.hf_token or "").strip() and settings.enable_hf_img2img:
         from app.services.hf_img2img import generate_hf_img2img_redesign
 
@@ -102,7 +99,6 @@ async def generate_redesign(
     else:
         notes.append("hf_img2img: skipped (HF_TOKEN missing or ENABLE_HF_IMG2IMG=false)")
 
-    # 5) Optional Gemini HQ (not required — usually paid/quota)
     if hq_mode and settings.enable_gemini_hq and settings.gemini_api_key:
         logger.info("REDESIGN try gemini_hq")
         path = await _gemini_hq(source_path, prompt)
@@ -132,74 +128,66 @@ class RedesignUnavailableError(Exception):
 async def _cloudflare_img2img(
     source_path: Path, prompt: str, hq_mode: bool = False
 ) -> tuple[str | None, str | None]:
-    """Cloudflare Workers AI — free daily Neurons. Prefer dedicated img2img model."""
+    """Use Cloudflare models that free accounts can access (not Runway img2img)."""
     settings = get_settings()
-    model = (settings.cloudflare_image_model or _DEFAULT_CF_IMG2IMG).strip()
-    # Lightning is text-to-image oriented; don't use it as the primary img2img model.
-    if "lightning" in model.lower() and "img2img" not in model.lower():
-        model = _DEFAULT_CF_IMG2IMG
-        logger.info("REDESIGN cloudflare using img2img model instead of lightning: %s", model)
-
+    configured = (settings.cloudflare_image_model or _DEFAULT_CF_MODEL).strip()
     account = (settings.cloudflare_account_id or "").strip()
     token = (settings.cloudflare_api_token or "").strip()
     if not account or not token:
         return None, "CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN empty"
 
+    models: list[str] = []
+    for m in (
+        configured,
+        "@cf/bytedance/stable-diffusion-xl-lightning",
+        "@cf/lykon/dreamshaper-8-lcm",
+    ):
+        # Skip Runway models — this account gets 403 "not allowed to access"
+        if not m or "runwayml" in m.lower():
+            continue
+        if m not in models:
+            models.append(m)
+    if not models:
+        models = [_DEFAULT_CF_MODEL]
+
     try:
         import io
 
         img = Image.open(source_path).convert("RGB")
-        # SD 1.5 img2img is happiest near 512
-        img.thumbnail((512, 512))
-        # Some CF runtimes prefer exact multiples of 8
+        img.thumbnail((768, 768))
         w, h = img.size
-        w8, h8 = max(256, (w // 8) * 8), max(256, (h // 8) * 8)
-        if (w8, h8) != (w, h):
-            img = img.resize((w8, h8), Image.Resampling.LANCZOS)
+        img = img.resize((max(512, (w // 8) * 8), max(512, (h // 8) * 8)), Image.Resampling.LANCZOS)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
-        image_b64 = base64.b64encode(png_bytes).decode()
-        # Flat uint8 RGB list (documented CF img2img `image` input)
-        flat_rgb = list(img.tobytes())
+        image_b64 = base64.b64encode(buf.getvalue()).decode()
 
-        strength = 0.62 if hq_mode else 0.52
-        num_steps = min(20 if hq_mode else 16, 20)
+        num_steps = 8 if hq_mode else 6
+        strength = 0.5 if hq_mode else 0.4
         negative = (
             "blurry, distorted windows, warped roof, extra floors, people, text, "
             "watermark, cartoon, low quality, different building layout"
         )
-        base_fields = {
-            "prompt": prompt,
-            "negative_prompt": negative,
-            "strength": strength,
-            "num_steps": num_steps,
-            "guidance": 7.5,
-            "width": img.size[0],
-            "height": img.size[1],
-        }
-        # Try several valid CF shapes — models differ on `image_b64` vs `image`
+
+        # txt2img first (reliable on lightning), then optional image_b64 img2img
         payloads = [
-            {**base_fields, "image_b64": image_b64},
-            {**base_fields, "image": flat_rgb},
+            {
+                "prompt": prompt,
+                "negative_prompt": negative,
+                "num_steps": num_steps,
+                "guidance": 7.5,
+                "width": img.size[0],
+                "height": img.size[1],
+            },
             {
                 "prompt": prompt,
                 "negative_prompt": negative,
                 "image_b64": image_b64,
                 "strength": strength,
                 "num_steps": num_steps,
+                "guidance": 7.5,
             },
         ]
-        # Img2img-capable models only (do NOT send image_* to lightning — it rejects them)
-        models = [
-            model,
-            "@cf/runwayml/stable-diffusion-v1-5-img2img",
-            "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-        ]
-        # de-dupe preserve order
-        seen: set[str] = set()
-        models = [m for m in models if not (m in seen or seen.add(m))]
 
         headers = {"Authorization": f"Bearer {token}"}
         logger.info(
@@ -210,17 +198,21 @@ async def _cloudflare_img2img(
             num_steps,
         )
         errors: list[str] = []
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             for try_model in models:
                 try_url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{try_model}"
                 for i, payload in enumerate(payloads):
+                    mode = "txt2img" if i == 0 else "img2img"
                     resp = await client.post(try_url, headers=headers, json=payload)
-                    label = f"model={try_model} payload={i}"
+                    label = f"model={try_model} mode={mode}"
                     if resp.status_code >= 400:
                         err = f"HTTP {resp.status_code} {label}: {resp.text[:140]}"
                         logger.warning("REDESIGN cloudflare %s", err)
                         errors.append(err)
+                        if resp.status_code == 403 and "not allowed" in resp.text.lower():
+                            break
                         continue
+
                     content_type = resp.headers.get("content-type", "")
                     root = ensure_upload_dirs()
                     name = f"{uuid.uuid4().hex}.png"
@@ -235,8 +227,7 @@ async def _cloudflare_img2img(
                         errors.append(f"non-json {label}")
                         continue
                     if data.get("success") is False:
-                        err = f"API error {label}: {str(data.get('errors') or data)[:140]}"
-                        errors.append(err)
+                        errors.append(f"API error {label}: {str(data.get('errors') or data)[:140]}")
                         continue
                     result = data.get("result")
                     raw: bytes | None = None
@@ -252,7 +243,7 @@ async def _cloudflare_img2img(
                         dest.write_bytes(raw)
                         logger.info("REDESIGN cloudflare ok %s", label)
                         return f"redesigns/{name}", None
-                    errors.append(f"unexpected result {label}: {str(type(result))}")
+                    errors.append(f"unexpected result {label}")
             return None, " | ".join(errors[:3]) if errors else "request failed"
     except Exception as exc:
         logger.warning("REDESIGN cloudflare exception: %s", exc)

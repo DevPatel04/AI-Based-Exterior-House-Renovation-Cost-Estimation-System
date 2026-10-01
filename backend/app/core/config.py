@@ -41,8 +41,8 @@ class Settings(BaseSettings):
 
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""
-    # Free Workers AI img2img (10k Neurons/day). Prefer img2img over lightning txt2img.
-    cloudflare_image_model: str = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+    # Free Workers AI — lightning works on most free accounts; runwayml img2img is often 403-blocked
+    cloudflare_image_model: str = "@cf/bytedance/stable-diffusion-xl-lightning"
 
     # Optional Hugging Face image-to-image (uses HF_TOKEN free monthly credits)
     enable_hf_img2img: bool = False
