@@ -528,14 +528,19 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     edges = cv2.Canny(gray_blur, 40, 120)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
 
-    # Dark recessed openings (windows) via blackhat
+    # Dark recessed openings (windows) via blackhat + adaptive threshold
     kernel_bh = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     blackhat = cv2.morphologyEx(gray_eq, cv2.MORPH_BLACKHAT, kernel_bh)
     _, dark = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    adaptive = cv2.adaptiveThreshold(
+        gray_eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 8
+    )
+    dark = cv2.bitwise_or(dark, adaptive)
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
 
     facade_area = float(max(1, (x1 - x0) * (y1 - y0)))
-    max_windows = max(6, min(12, int(facade_area / 8000)))
+    max_windows = max(8, min(16, int(facade_area / 6000)))
     candidates: list[tuple[float, dict]] = []
 
     def _add_contour(c, score_bonus: float = 0.0) -> None:
@@ -646,10 +651,95 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     return _merge_region_lists(regions, added)
 
 
+def _estimate_facade_bbox(rgb: np.ndarray) -> tuple[int, int, int, int]:
+    """
+    Estimate building facade bbox: drop sky/grass, keep densest vertical structure.
+    """
+    h, w = rgb.shape[:2]
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+
+    # Sky-ish: bright + low saturation in top third
+    top = hsv[: max(1, h // 3), :, :]
+    sky_mask = np.zeros((h, w), dtype=np.uint8)
+    sky_v = (hsv[:, :, 2] > 160) & (hsv[:, :, 1] < 60)
+    sky_mask[sky_v] = 255
+    sky_mask[h // 2 :, :] = 0  # don't treat lower facade as sky
+    sky_mask = cv2.morphologyEx(sky_mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
+
+    # Vegetation: green
+    green = (hsv[:, :, 0] >= 35) & (hsv[:, :, 0] <= 95) & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 40)
+    veg = np.zeros((h, w), dtype=np.uint8)
+    veg[green] = 255
+    veg = cv2.morphologyEx(veg, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
+
+    # Building = not sky/veg + some texture
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 120)
+    edges[sky_mask > 0] = 0
+    edges[veg > 0] = 0
+    # Prefer central band so trees on sides don't expand bbox
+    edges[:, : int(w * 0.04)] = 0
+    edges[:, int(w * 0.96) :] = 0
+
+    # Dilate edges into blobs, take largest central component
+    dense = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=3)
+    dense = cv2.morphologyEx(dense, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8), iterations=2)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(dense, connectivity=8)
+    best = None
+    best_score = -1.0
+    for i in range(1, n):
+        area = float(stats[i, cv2.CC_STAT_AREA])
+        if area < (w * h) * 0.02:
+            continue
+        cx, cy = float(centroids[i][0]), float(centroids[i][1])
+        # Prefer large, central components
+        center_bonus = 1.0 - (abs(cx - w / 2) / w + abs(cy - h / 2) / h) * 0.5
+        score = area * max(0.2, center_bonus)
+        if score > best_score:
+            best_score = score
+            x, y, bw, bh = (
+                int(stats[i, cv2.CC_STAT_LEFT]),
+                int(stats[i, cv2.CC_STAT_TOP]),
+                int(stats[i, cv2.CC_STAT_WIDTH]),
+                int(stats[i, cv2.CC_STAT_HEIGHT]),
+            )
+            best = (x, y, x + bw, y + bh)
+
+    if best is not None:
+        bx0, by0, bx1, by1 = best
+        ys, xs = np.where(edges[by0:by1, bx0:bx1] > 0)
+        if len(xs) > 80:
+            x0 = bx0 + int(np.percentile(xs, 5))
+            x1 = bx0 + int(np.percentile(xs, 95))
+            y0 = by0 + int(np.percentile(ys, 5))
+            y1 = by0 + int(np.percentile(ys, 95))
+        else:
+            x0, y0, x1, y1 = bx0, by0, bx1, by1
+        pad_x = int(max(4, (x1 - x0) * 0.03))
+        pad_y = int(max(4, (y1 - y0) * 0.03))
+        return (
+            max(0, x0 - pad_x),
+            max(0, y0 - pad_y),
+            min(w - 1, x1 + pad_x),
+            min(h - 1, y1 + pad_y),
+        )
+
+    # Fallback: edge percentiles
+    ys, xs = np.where(edges > 0)
+    if len(xs) > 50:
+        return (
+            int(np.percentile(xs, 8)),
+            int(np.percentile(ys, 10)),
+            int(np.percentile(xs, 92)),
+            int(np.percentile(ys, 90)),
+        )
+    return int(w * 0.12), int(h * 0.15), int(w * 0.88), int(h * 0.88)
+
+
 def detect_opencv_fallback(image_path: Path) -> list[dict]:
     """
     Last-resort detector when HF/Replicate are unavailable.
-    Places a facade wall box on the central image band, then finds windows/doors.
+    Estimates facade bbox (sky/veg stripped), then finds windows/doors.
     """
     try:
         pil = Image.open(image_path).convert("RGB")
@@ -661,24 +751,13 @@ def detect_opencv_fallback(image_path: Path) -> list[dict]:
         raise StructureDetectError(f"Could not read project image: {exc}") from exc
 
     h, w = rgb.shape[:2]
-    # Estimate facade as the densest edge band in the middle of the frame
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    # Ignore outer 5% (often sky/ground margins)
-    ys, xs = np.where(edges > 0)
-    if len(xs) > 50:
-        x0 = int(np.percentile(xs, 8))
-        x1 = int(np.percentile(xs, 92))
-        y0 = int(np.percentile(ys, 10))
-        y1 = int(np.percentile(ys, 90))
-    else:
-        x0, y0, x1, y1 = int(w * 0.12), int(h * 0.15), int(w * 0.88), int(h * 0.88)
+    x0, y0, x1, y1 = _estimate_facade_bbox(rgb)
 
     wall = {
         "region_type": RegionType.main_wall.value,
         "label": "Main wall",
         "points": _bbox_points(x0, y0, x1, y1, w, h),
-        "confidence": 0.45,
+        "confidence": 0.5,
         "source": "opencv_fallback",
     }
     regions = enrich_with_opencv_parts(rgb, [wall])

@@ -939,7 +939,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Redesign with Pollinations Nano Banana (free key) then Cloudflare Lightning — materials on “${activeDesign.name}”.`
+              ? `Redesign with Cloudflare Workers AI — materials on “${activeDesign.name}”.`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
@@ -948,7 +948,7 @@ export default function ProjectWorkspacePage() {
                 className="btn-outline"
                 onClick={() => runVisualize(true)}
                 disabled={busy}
-                title="Higher-res Pollinations / Cloudflare render"
+                title="Higher-res Cloudflare Workers AI render"
               >
                 <Icon name="sparkles" /> HQ render
               </button>
@@ -976,38 +976,8 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
-                {activeDesign?.prompt_used?.includes("[pollinations_nanobanana]") && (
-                  <Badge tone="brand">Pollinations Nano Banana</Badge>
-                )}
                 {activeDesign?.prompt_used?.includes("[cloudflare]") && (
                   <Badge tone="brand">Cloudflare Lightning</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[region_materials]") && (
-                  <Badge tone="brand">Region materials</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[nano_banana]") && (
-                  <Badge tone="brand">Replicate Nano Banana</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[replicate_img2img]") && (
-                  <Badge tone="brand">Replicate img2img</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[replicate_controlnet]") && (
-                  <Badge tone="brand">Replicate ControlNet</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[fal_controlnet]") && (
-                  <Badge tone="brand">fal ControlNet</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[photo_edit]") && (
-                  <Badge tone="brand">Photo edit (real)</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[gemini_hq]") && (
-                  <Badge tone="violet">Gemini HQ</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[hf_img2img]") && (
-                  <Badge tone="neutral">Hugging Face</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[local_fallback]") && (
-                  <Badge tone="warning">Local preview (not AI)</Badge>
                 )}
               </figcaption>
               {activeDesign?.redesign_path ? (

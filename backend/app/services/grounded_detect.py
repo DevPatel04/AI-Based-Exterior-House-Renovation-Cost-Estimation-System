@@ -20,10 +20,11 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_MAP = [
     ("building facade wall", RegionType.main_wall.value, "Main wall"),
-    ("house window", RegionType.window.value, "Window"),
-    ("front door", RegionType.gate.value, "Door / gate"),
-    ("balcony railing", RegionType.balcony.value, "Balcony"),
-    ("roof edge", RegionType.roof_edge.value, "Roof edge"),
+    ("rectangular window", RegionType.window.value, "Window"),
+    ("house window glass", RegionType.window.value, "Window"),
+    ("front door entrance", RegionType.gate.value, "Door / gate"),
+    ("balcony", RegionType.balcony.value, "Balcony"),
+    ("roof eave", RegionType.roof_edge.value, "Roof edge"),
     ("metal railing", RegionType.railing.value, "Railing"),
     ("pillar column", RegionType.pillar.value, "Pillar"),
 ]

@@ -17,6 +17,11 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from app.services.storage import absolute_path, ensure_upload_dirs
 
+try:
+    from app.models import RegionType
+except Exception:  # pragma: no cover
+    RegionType = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -165,6 +170,25 @@ def apply_region_materials(
             key=lambda a: abs(_poly_area(a.points)),
             reverse=True,
         )
+        # Openings that should be punched out of wall paints
+        if RegionType is not None:
+            opening_types = {
+                RegionType.window.value,
+                RegionType.gate.value,
+                RegionType.balcony.value,
+                RegionType.railing.value,
+                RegionType.pillar.value,
+            }
+            wall_type = RegionType.main_wall.value
+        else:
+            opening_types = {"window", "gate", "balcony", "railing", "pillar"}
+            wall_type = "main_wall"
+        opening_polys = [
+            _poly_pixels(a.points, w, h)
+            for a in assignments
+            if a.region_type in opening_types and len(_poly_pixels(a.points, w, h)) >= 3
+        ]
+
         for a in ordered:
             coords = _poly_pixels(a.points, w, h)
             if len(coords) < 3:
@@ -192,6 +216,10 @@ def apply_region_materials(
             mask = Image.new("L", (w, h), 0)
             draw = ImageDraw.Draw(mask)
             draw.polygon(coords, fill=int(255 * max(0.35, min(0.95, opacity))))
+            # Wall paint must not cover windows/doors (common detect overlay bug)
+            if a.region_type == wall_type and opening_polys:
+                for op in opening_polys:
+                    draw.polygon(op, fill=0)
             # Soft edge so it looks painted onto the facade, not a hard sticker
             mask = mask.filter(ImageFilter.GaussianBlur(radius=max(1, min(w, h) // 250)))
 

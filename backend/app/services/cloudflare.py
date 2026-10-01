@@ -33,13 +33,8 @@ async def generate_redesign(
     assignments: list | None = None,
 ) -> tuple[str, str, list[str]]:
     """
-    Returns (relative_path, engine_used, failure_notes).
-
-    Free-first order:
-      1) Pollinations nanobanana (reference photo, no key)
-      2) Cloudflare SDXL Lightning (blended onto photo / material guide)
-      3) Optional Replicate engines
-      4) Region material map / photo edit fallback
+    Cloudflare Workers AI only (SDXL Lightning).
+    Blends result onto the original photo so geometry stays real.
     """
     from app.services.material_regions import (
         RegionMaterialAssignment,
@@ -50,144 +45,52 @@ async def generate_redesign(
 
     settings = get_settings()
     notes: list[str] = []
-    has_replicate = bool((settings.replicate_api_token or "").strip())
     region_assignments: list[RegionMaterialAssignment] = [
         a for a in (assignments or []) if isinstance(a, RegionMaterialAssignment)
     ]
+    has_cf = bool(
+        settings.enable_cloudflare_redesign
+        and (settings.cloudflare_account_id or "").strip()
+        and (settings.cloudflare_api_token or "").strip()
+    )
     logger.info(
-        "REDESIGN begin hq=%s regions=%s pollinations=%s cloudflare=%s replicate=%s",
+        "REDESIGN begin engine=cloudflare_only hq=%s regions=%s cf_ready=%s",
         hq_mode,
         len(region_assignments),
-        bool(settings.enable_pollinations_nanobanana),
-        bool(
-            settings.enable_cloudflare_redesign
-            and settings.cloudflare_account_id
-            and settings.cloudflare_api_token
-        ),
-        has_replicate,
+        has_cf,
     )
 
-    material_guide_rel: str | None = None
+    # Subtle material guide (optional conditioning) — never returned as final image
     material_guide_path: Path | None = None
-    # Material guide for AI only (subtle) — not shown as final redesign
     if region_assignments:
-        material_guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.45)
-        if material_guide_rel:
-            material_guide_path = abs_upload(material_guide_rel)
-            logger.info("REDESIGN material_guide ready path=%s", material_guide_rel)
-            notes.append(f"material_guide: applied {len(region_assignments)} region materials")
-        else:
-            notes.append("material_guide: failed to paint region materials")
+        guide_rel = apply_region_materials(source_path, region_assignments, opacity=0.35)
+        if guide_rel:
+            material_guide_path = abs_upload(guide_rel)
+            notes.append(f"material_guide: {len(region_assignments)} regions")
 
-    texture_paths: list[Path] = []
-    for a in region_assignments:
-        if a.texture_path:
-            try:
-                tp = abs_upload(a.texture_path)
-                if tp.exists() and tp not in texture_paths:
-                    texture_paths.append(tp)
-            except Exception:
-                pass
-
-    def _finalize_ai(path: str, weight: float = 0.72) -> str:
-        if region_assignments:
-            return mask_ai_to_regions(source_path, path, region_assignments, ai_weight=weight)
-        return path
-
-    # 1) Pollinations Nano Banana — free, reference-image edit
-    if settings.enable_pollinations_nanobanana:
-        from app.services.pollinations_nanobanana import generate_pollinations_nanobanana_redesign
-
-        logger.info("REDESIGN try pollinations_nanobanana")
-        path, err = await generate_pollinations_nanobanana_redesign(
-            source_path,
-            prompt,
-            hq_mode=hq_mode,
-            guide_path=material_guide_path,
-        )
-        if path:
-            path = _finalize_ai(path, 0.8)
-            logger.info("REDESIGN ok engine=pollinations_nanobanana path=%s", path)
-            return path, "pollinations_nanobanana", notes
-        notes.append(f"pollinations_nanobanana: {err or 'failed'}")
-        logger.warning("REDESIGN fail pollinations_nanobanana err=%s", err)
-    else:
-        notes.append("pollinations_nanobanana: skipped (ENABLE_POLLINATIONS_NANOBANANA=false)")
-
-    # 2) Cloudflare SDXL Lightning — free neurons; always blend onto real photo
-    if (
-        settings.enable_cloudflare_redesign
-        and settings.cloudflare_account_id
-        and settings.cloudflare_api_token
-    ):
-        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
-        cf_src = material_guide_path if material_guide_path else source_path
-        path, cf_err = await _cloudflare_img2img(cf_src, prompt, hq_mode=hq_mode)
-        if path:
-            # Heavy blend keeps original geometry (Lightning alone invents houses)
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.32)
-            path = _finalize_ai(path, 0.55)
-            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-            return path, "cloudflare", notes
-        notes.append(f"cloudflare: {cf_err or 'request failed'}")
-        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
-    else:
+    if not has_cf:
         notes.append(
-            "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
-            "and ENABLE_CLOUDFLARE_REDESIGN=true"
+            "cloudflare: set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
+            "(Workers AI) and ENABLE_CLOUDFLARE_REDESIGN=true"
         )
+        raise RedesignUnavailableError(notes)
 
-    # 3) Optional Replicate Nano Banana / img2img (paid)
-    if has_replicate and settings.enable_nano_banana:
-        from app.services.replicate_nano_banana import generate_nano_banana_redesign
+    logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+    # Prefer real photo as input (guide invents flat boxes); use guide only as soft blend target later
+    path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
+    if not path and material_guide_path is not None:
+        notes.append(f"cloudflare photo-pass: {cf_err or 'failed'}")
+        path, cf_err = await _cloudflare_img2img(material_guide_path, prompt, hq_mode=hq_mode)
+    if path:
+        # Keep original house geometry; mix in CF materials
+        path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.42 if hq_mode else 0.36)
+        if region_assignments:
+            path = mask_ai_to_regions(source_path, path, region_assignments, ai_weight=0.7)
+        logger.info("REDESIGN ok engine=cloudflare path=%s", path)
+        return path, "cloudflare", notes
 
-        logger.info("REDESIGN try replicate_nano_banana")
-        path, err = await generate_nano_banana_redesign(
-            source_path,
-            prompt,
-            hq_mode=hq_mode,
-            guide_path=material_guide_path,
-            texture_paths=texture_paths,
-        )
-        if path:
-            path = _finalize_ai(path, 0.78)
-            logger.info("REDESIGN ok engine=nano_banana path=%s", path)
-            return path, "nano_banana", notes
-        notes.append(f"nano_banana: {err or 'failed'}")
-        logger.warning("REDESIGN fail nano_banana err=%s", err)
-
-    if has_replicate and settings.enable_replicate_img2img:
-        from app.services.replicate_img2img import generate_replicate_img2img_redesign
-
-        logger.info("REDESIGN try replicate_img2img")
-        img2img_src = material_guide_path if material_guide_path else source_path
-        path, err = await generate_replicate_img2img_redesign(img2img_src, prompt, hq_mode=hq_mode)
-        if path:
-            path = _finalize_ai(path, 0.7)
-            logger.info("REDESIGN ok engine=replicate_img2img path=%s", path)
-            return path, "replicate_img2img", notes
-        notes.append(f"replicate_img2img: {err or 'failed'}")
-
-    if has_replicate and settings.enable_replicate_controlnet:
-        from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
-
-        logger.info("REDESIGN try replicate_controlnet")
-        path, err = await generate_replicate_controlnet_redesign(source_path, prompt)
-        if path:
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.5)
-            path = _finalize_ai(path, 0.65)
-            logger.info("REDESIGN ok engine=replicate_controlnet path=%s", path)
-            return path, "replicate_controlnet", notes
-        notes.append(f"replicate_controlnet: {err or 'failed'}")
-
-    # 4) Do NOT return crude polygon paint as the redesign (looks like white boxes).
-    # Only soft photo grade if explicitly allowed.
-    if settings.allow_local_redesign_fallback:
-        path = _photoreal_photo_edit(source_path, prompt) or _local_fallback_redesign(source_path, prompt)
-        logger.warning("REDESIGN local_fallback path=%s notes=%s", path, notes)
-        return path, "photo_edit", notes
-
-    logger.error("REDESIGN unavailable notes=%s", notes)
+    notes.append(f"cloudflare: {cf_err or 'request failed'}")
+    logger.error("REDESIGN cloudflare failed notes=%s", notes)
     raise RedesignUnavailableError(notes)
 
 

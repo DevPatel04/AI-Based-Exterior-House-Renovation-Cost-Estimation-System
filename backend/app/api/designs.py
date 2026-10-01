@@ -220,11 +220,10 @@ async def visualize(
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI redesign unavailable. "
+                "AI redesign unavailable (Cloudflare only). "
                 + " | ".join(exc.notes)
-                + " Pollinations nanobanana needs pollen (top up https://enter.pollinations.ai/), "
-                + "or set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, "
-                + "or enable Replicate (ENABLE_NANO_BANANA / ENABLE_REPLICATE_IMG2IMG)."
+                + " Set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN for Workers AI "
+                "(https://developers.cloudflare.com/workers-ai/get-started/rest-api/)."
             ),
         ) from exc
     design.redesign_path = rel

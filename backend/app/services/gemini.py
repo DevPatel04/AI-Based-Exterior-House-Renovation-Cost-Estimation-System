@@ -46,12 +46,12 @@ async def gemini_quality_notes(image_path: Path) -> str | None:
 
 async def detect_structure_regions(image_path: Path) -> list[dict]:
     """
-    Structure detection (no hardcoded default boxes).
+    Detect facade parts (wall, windows, doors, roof, …).
 
     Order:
-      1) SegFormer ADE + CMP (merged) + OpenCV window/door enrich
-      2) If still walls-only and Replicate token set → Grounded-SAM merge
-      3) OpenCV-only fallback (so detect never hard-fails without tokens)
+      1) SegFormer ADE + CMP (when HF_TOKEN set) + OpenCV enrich
+      2) Grounded-SAM (Replicate) when openings scarce OR SegFormer unavailable
+      3) OpenCV-only fallback
     """
     import logging
 
@@ -59,39 +59,46 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     from app.services.segformer import detect_opencv_fallback, detect_segformer_regions
 
     logger = logging.getLogger(__name__)
+    settings = get_settings()
     last_err: Exception | None = None
     regions: list[dict] = []
-    try:
-        regions = await detect_segformer_regions(image_path)
-    except StructureDetectError as exc:
-        last_err = exc
-        logger.error("SegFormer detect failed: %s", exc)
-    except Exception as exc:
-        last_err = StructureDetectError(str(exc))
-        logger.exception("SegFormer detect crashed: %s", exc)
+    has_hf = bool((settings.hf_token or "").strip()) and settings.enable_segformer
+    has_replicate = bool((settings.replicate_api_token or "").strip())
+    min_openings = int(getattr(settings, "grounded_min_openings", 3) or 3)
+
+    if has_hf:
+        try:
+            regions = await detect_segformer_regions(image_path)
+        except StructureDetectError as exc:
+            last_err = exc
+            logger.error("SegFormer detect failed: %s", exc)
+        except Exception as exc:
+            last_err = StructureDetectError(str(exc))
+            logger.exception("SegFormer detect crashed: %s", exc)
+    else:
+        logger.warning(
+            "DETECT HF_TOKEN missing — SegFormer skipped; using Grounded-SAM / OpenCV"
+        )
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
     windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
-    settings = get_settings()
-    min_openings = int(getattr(settings, "grounded_min_openings", 3) or 3)
-    # Run Grounded when openings are scarce (not only when almost wall-only)
-    need_parts = non_wall < min_openings or windows < 2
-    if need_parts and (settings.replicate_api_token or "").strip():
+    need_parts = (not regions) or non_wall < min_openings or windows < 2
+
+    if need_parts and has_replicate:
         try:
             from app.services.grounded_detect import detect_grounded_regions
             from app.services.segformer import _merge_region_lists, enrich_with_opencv_parts
 
             logger.info(
-                "DETECT trying Grounded-SAM (non_wall=%s windows=%s min=%s)",
+                "DETECT trying Grounded-SAM (non_wall=%s windows=%s min=%s hf=%s)",
                 non_wall,
                 windows,
                 min_openings,
+                has_hf,
             )
             grounded = await detect_grounded_regions(image_path)
             regions = _merge_region_lists(regions, grounded)
-            # Re-enrich openings after Grounded merge
             try:
-                from fastapi.concurrency import run_in_threadpool
                 from PIL import Image
                 import numpy as np
 
@@ -114,10 +121,7 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
     if regions:
         return regions
 
-    # Always try OpenCV fallback instead of returning 503 when cloud AI is down/misconfigured
     try:
-        from fastapi.concurrency import run_in_threadpool
-
         fallback = await run_in_threadpool(detect_opencv_fallback, image_path)
         if fallback:
             if last_err:

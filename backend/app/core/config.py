@@ -50,34 +50,34 @@ class Settings(BaseSettings):
     enable_hf_img2img: bool = False
     hf_img2img_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
 
-    # Optional fal.ai ControlNet (cloud GPU — no local GPU required)
+    # fal.ai — disabled (Cloudflare-only redesign)
     fal_key: str = ""
-    enable_fal_controlnet: bool = True
+    enable_fal_controlnet: bool = False
     fal_controlnet_model: str = "fal-ai/fast-sdxl-controlnet-canny"
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 20
 
-    # Free redesign: Pollinations Nano Banana (no key) + Cloudflare SDXL Lightning
-    enable_pollinations_nanobanana: bool = True
+    # Redesign: Cloudflare Workers AI only
+    enable_pollinations_nanobanana: bool = False
     pollinations_nanobanana_model: str = "nanobanana"
-    pollinations_api_key: str = ""  # optional — anonymous works when edits allow it
+    pollinations_api_key: str = ""
     enable_cloudflare_redesign: bool = True
 
-    # Optional Replicate (paid) — off by default; Pollinations/Cloudflare are primary
+    # Replicate redesign engines off — token kept for Grounded-SAM detect only
     replicate_api_token: str = ""
-    enable_nano_banana: bool = True
+    enable_nano_banana: bool = False
     nano_banana_model: str = "google/nano-banana-2"
-    nano_banana_resolution: str = "1K"  # 1K | 2K | 4K (HQ uses 2K)
-    enable_replicate_img2img: bool = True
+    nano_banana_resolution: str = "1K"
+    enable_replicate_img2img: bool = False
     replicate_img2img_model: str = "lucataco/sdxl"
     replicate_img2img_strength: float = 0.45
     replicate_img2img_steps: int = 28
-    enable_replicate_controlnet: bool = True
+    enable_replicate_controlnet: bool = False
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85
     replicate_controlnet_steps: int = 24
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
-    # Crude polygon paint is only a guide for AI — do not return it as the redesign
+    # Never return crude painted boxes as the redesign
     allow_local_redesign_fallback: bool = False
 
     # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
@@ -92,9 +92,9 @@ class Settings(BaseSettings):
     # SegFormer / Grounded detect long edge (higher = better small windows)
     detect_max_edge: int = 1280
     # Call Grounded-SAM when openings below this count
-    grounded_min_openings: int = 3
-    grounded_box_threshold: float = 0.35
-    grounded_text_threshold: float = 0.25
+    grounded_min_openings: int = 2
+    grounded_box_threshold: float = 0.30
+    grounded_text_threshold: float = 0.22
     replicate_seg_model: str = "schananas/grounded_sam"
 
     default_door_width_ft: float = 3.0
