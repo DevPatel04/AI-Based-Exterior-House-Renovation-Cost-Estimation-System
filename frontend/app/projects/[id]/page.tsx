@@ -979,6 +979,9 @@ export default function ProjectWorkspacePage() {
                 {activeDesign?.prompt_used?.includes("[cloudflare]") && (
                   <Badge tone="brand">Cloudflare Lightning</Badge>
                 )}
+                {activeDesign?.prompt_used?.includes("scene_describe=") && (
+                  <Badge tone="neutral">Photo describe</Badge>
+                )}
               </figcaption>
               {activeDesign?.redesign_path ? (
                 <AuthImage

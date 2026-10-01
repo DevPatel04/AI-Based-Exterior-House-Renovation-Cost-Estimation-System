@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     cloudflare_api_token: str = ""
     # Free Workers AI — lightning works on most free accounts; runwayml img2img is often 403-blocked
     cloudflare_image_model: str = "@cf/bytedance/stable-diffusion-xl-lightning"
+    # Vision model for describing the uploaded photo → redesign prompt context
+    cloudflare_vision_model: str = "@cf/llava-hf/llava-1.5-7b-hf"
+    enable_image_describe: bool = True
 
     # Optional Hugging Face image-to-image (uses HF_TOKEN free monthly credits)
     enable_hf_img2img: bool = False

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import Design, DesignRegionMaterial, Material, ProjectImage, ProjectStatus, StructureRegion, User
 from app.schemas import DesignCreate, DesignOut, DesignRegionMaterialIn, VisualizeRequest
@@ -209,6 +210,15 @@ async def visualize(
         )
 
     prompt = build_region_material_prompt(assignments, design_name=design.name)
+    scene_text: str | None = None
+    scene_engine: str | None = None
+    settings = get_settings()
+    if getattr(settings, "enable_image_describe", True):
+        from app.services.image_describe import describe_uploaded_image, inject_scene_into_prompt
+
+        scene_text, scene_engine = await describe_uploaded_image(absolute_path(image.file_path))
+        if scene_text:
+            prompt = inject_scene_into_prompt(prompt, scene_text)
     try:
         rel, engine, notes = await generate_redesign(
             absolute_path(image.file_path),
@@ -226,10 +236,13 @@ async def visualize(
                 "(https://developers.cloudflare.com/workers-ai/get-started/rest-api/)."
             ),
         ) from exc
+    if scene_engine:
+        notes = list(notes or [])
+        notes.append(f"scene_describe={scene_engine}")
     design.redesign_path = rel
     note_suffix = (
         f" :: {' | '.join(notes)}"
-        if notes and engine in {"local_fallback", "photo_edit", "region_materials"}
+        if notes
         else ""
     )
     design.prompt_used = f"[{engine}] {prompt}{note_suffix}"
