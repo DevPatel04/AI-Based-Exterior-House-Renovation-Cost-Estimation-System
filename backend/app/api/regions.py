@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models import ProjectImage, RegionType, StructureRegion, User
 from app.schemas import RegionCreate, RegionOut, RegionUpdate
 from app.services.gemini import detect_structure_regions
+from app.services.segformer import StructureDetectError
 from app.services.storage import absolute_path
 
 router = APIRouter(prefix="/api/projects/{project_id}/regions", tags=["regions"])
@@ -29,7 +30,16 @@ async def detect_regions(
     if not image:
         raise HTTPException(status_code=400, detail="Upload an exterior image first")
 
-    detected = await detect_structure_regions(absolute_path(image.file_path))
+    try:
+        detected = await detect_structure_regions(absolute_path(image.file_path))
+    except StructureDetectError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not detected:
+        raise HTTPException(
+            status_code=422,
+            detail="No structure regions found. Try a clearer front view, or draw regions manually.",
+        )
+
     # Keep manually corrected regions; only wipe auto-detected ones
     db.query(StructureRegion).filter(
         StructureRegion.project_id == project.id,

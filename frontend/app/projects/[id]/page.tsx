@@ -193,11 +193,11 @@ export default function ProjectWorkspacePage() {
       if (!ok) return;
     }
     setBusy(true);
-    setProgress("Detecting structure regions (AI)… this can take a moment.");
+    setProgress("Detecting with SegFormer (masks)… this can take ~15–60s.");
     try {
       const regs = await api.detectRegions(projectId);
       setRegions(regs);
-      toast.success(`Detected ${regs.length} regions. Adjust any outlines if needed.`);
+      toast.success(`SegFormer detected ${regs.length} regions. Drag handles to fine-tune.`);
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -675,7 +675,7 @@ export default function ProjectWorkspacePage() {
           {primary ? (
             <>
               {regions.length === 0 && (
-                <Alert tone="info">No regions yet. Click “Detect with AI” to outline the facade automatically, or draw regions manually.</Alert>
+                <Alert tone="info">No regions yet. Click “Detect with AI” (SegFormer masks). Requires HF_TOKEN on the backend — or draw regions manually.</Alert>
               )}
               <RegionCanvas projectId={projectId} imageId={primary.id} regions={regions} onChange={setRegions} />
             </>

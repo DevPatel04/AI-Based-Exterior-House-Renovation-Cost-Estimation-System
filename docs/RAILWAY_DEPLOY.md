@@ -58,12 +58,14 @@ git push origin develop
 | `CLOUDFLARE_ACCOUNT_ID` | optional                                                       |
 | `CLOUDFLARE_API_TOKEN`  | optional                                                       |
 | `ENABLE_GEMINI_HQ`      | `false`                                                        |
-| `HF_TOKEN`              | optional — [Hugging Face](https://huggingface.co/settings/tokens) for SegFormer + Depth Anything |
-| `ENABLE_SEGFORMER`      | `true` (CMP facade region detect when `HF_TOKEN` set)          |
+| `HF_TOKEN`              | **required for Detect** — [Hugging Face](https://huggingface.co/settings/tokens) SegFormer masks |
+| `ENABLE_SEGFORMER`      | `true`                                                         |
+| `SEGFORMER_MODEL`       | default `nvidia/segformer-b0-finetuned-ade-512-512`            |
 | `ENABLE_DEPTH_SCALE`    | `true` (Depth Anything V2 scale when `HF_TOKEN` / Replicate set) |
-| `REPLICATE_API_TOKEN`   | optional — [Replicate](https://replicate.com/account/api-tokens) ControlNet (free trial credit) |
+| `REPLICATE_API_TOKEN`   | optional — ControlNet redesign + Grounded-SAM detect backup    |
 | `ENABLE_REPLICATE_CONTROLNET` | `true` (preferred ControlNet path when token set)        |
 | `REPLICATE_CONTROLNET_MODEL` | default `lucataco/sdxl-controlnet`                          |
+| `REPLICATE_SEG_MODEL`   | default `schananas/grounded_sam` (detect backup)               |
 | `FAL_KEY`               | optional — only if you have fal credits                        |
 | `ENABLE_FAL_CONTROLNET` | `true` (used when `FAL_KEY` is set; after Replicate)           |
 | `FAL_CONTROLNET_MODEL`  | default `fal-ai/fast-sdxl-controlnet-canny`                    |

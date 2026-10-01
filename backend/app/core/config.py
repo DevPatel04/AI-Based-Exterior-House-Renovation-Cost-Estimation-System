@@ -61,9 +61,10 @@ class Settings(BaseSettings):
     # Hugging Face Inference — SegFormer CMP facade + Depth Anything V2
     hf_token: str = ""
     enable_segformer: bool = True
-    segformer_model: str = "Xpitfire/segformer-finetuned-segments-cmp-facade"
+    segformer_model: str = "nvidia/segformer-b0-finetuned-ade-512-512"
     enable_depth_scale: bool = True
     depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
+    replicate_seg_model: str = "schananas/grounded_sam"
 
     default_door_width_ft: float = 3.0
     default_door_height_ft: float = 7.0
