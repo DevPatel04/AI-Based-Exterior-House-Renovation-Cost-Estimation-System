@@ -5,7 +5,15 @@ from app.api.deps import get_current_user, get_user_role_names, require_permissi
 from app.core.database import get_db
 from app.core.permissions import user_has_permission
 from app.models import MemberRole, Project, ProjectMember, ProjectStatus, User
-from app.schemas import ProjectCreate, ProjectMemberIn, ProjectMemberOut, ProjectOut, ProjectUpdate
+from app.schemas import (
+    MaterialSuggestionOut,
+    MaterialSuggestionsResponse,
+    ProjectCreate,
+    ProjectMemberIn,
+    ProjectMemberOut,
+    ProjectOut,
+    ProjectUpdate,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -211,3 +219,26 @@ def remove_member(
         raise HTTPException(status_code=404, detail="Member not found")
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{project_id}/suggest-materials", response_model=MaterialSuggestionsResponse)
+def suggest_materials(
+    project_id: int,
+    user: User = Depends(require_permission("materials:select")),
+    db: Session = Depends(get_db),
+):
+    """AI / rule-based material suggestions for each detected region."""
+    project = _get_project_for_edit(db, project_id, user)
+    from app.services.material_suggest import suggest_materials_for_project
+
+    suggestions = suggest_materials_for_project(db, project.id)
+    if not suggestions:
+        raise HTTPException(
+            status_code=400,
+            detail="Detect regions and ensure the material catalog has active items first.",
+        )
+    engine = "gemini" if any(s.get("source") == "gemini" for s in suggestions) else "rules"
+    return MaterialSuggestionsResponse(
+        suggestions=[MaterialSuggestionOut(**s) for s in suggestions],
+        engine=engine,
+    )

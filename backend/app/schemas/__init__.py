@@ -304,6 +304,22 @@ class ReportOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MaterialSuggestionOut(BaseModel):
+    region_id: int
+    region_label: str
+    region_type: str
+    material_id: int
+    material_name: str
+    material_type: str
+    reason: str
+    source: str
+
+
+class MaterialSuggestionsResponse(BaseModel):
+    suggestions: list[MaterialSuggestionOut]
+    engine: str = "rules"
+
+
 class ReferenceMeasurements(BaseModel):
     known_width_ft: float | None = Field(default=None, gt=0)
     known_height_ft: float | None = Field(default=None, gt=0)

@@ -227,6 +227,10 @@ export const api = {
     }),
   getDesignMaterials: (projectId: number, designId: number) =>
     request<any[]>(`/api/projects/${projectId}/designs/${designId}/materials`),
+  suggestMaterials: (projectId: number) =>
+    request<{ suggestions: any[]; engine: string }>(`/api/projects/${projectId}/suggest-materials`, {
+      method: "POST",
+    }),
   visualize: (projectId: number, designId: number, hq_mode = false) =>
     request(`/api/projects/${projectId}/designs/visualize`, {
       method: "POST",

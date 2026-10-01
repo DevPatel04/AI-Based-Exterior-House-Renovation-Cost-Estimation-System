@@ -50,6 +50,7 @@ export default function ProjectWorkspacePage() {
   const [designs, setDesigns] = useState<any[]>([]);
   const [activeDesignId, setActiveDesignId] = useState<number | null>(null);
   const [assignments, setAssignments] = useState<Record<number, number>>({});
+  const [suggestionReasons, setSuggestionReasons] = useState<Record<number, string>>({});
   const [areas, setAreas] = useState<any[]>([]);
   const [quantities, setQuantities] = useState<any[]>([]);
   const [costs, setCosts] = useState<any>(null);
@@ -290,6 +291,36 @@ export default function ProjectWorkspacePage() {
       setStep(3);
     } catch (err: any) {
       toast.error(err.message);
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
+  async function runMaterialSuggestions() {
+    if (!regions.length) {
+      toast.error("Detect regions first.");
+      return;
+    }
+    setBusy(true);
+    setProgress("Suggesting materials…");
+    try {
+      const res = await api.suggestMaterials(projectId);
+      const next: Record<number, number> = { ...assignments };
+      const reasons: Record<number, string> = {};
+      for (const s of res.suggestions || []) {
+        next[s.region_id] = s.material_id;
+        reasons[s.region_id] = s.reason;
+      }
+      setAssignments(next);
+      setSuggestionReasons(reasons);
+      toast.success(
+        res.engine === "gemini"
+          ? `AI suggested finishes for ${res.suggestions.length} regions.`
+          : `Catalog suggestions applied to ${res.suggestions.length} regions.`
+      );
+    } catch (err: any) {
+      toast.error(err.message || "Could not suggest materials");
     } finally {
       setBusy(false);
       setProgress("");
@@ -810,7 +841,7 @@ export default function ProjectWorkspacePage() {
       {step === 2 && (
         <StepCard
           title="Apply materials"
-          description="Pick a finish for each region. Create design variants to compare options side by side."
+          description="Pick a finish for each region, or let AI suggest a cohesive set from your catalog."
         >
           <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4 lg:flex-row lg:items-end">
             <Field label="Design variant" className="lg:w-64">
@@ -864,11 +895,23 @@ export default function ProjectWorkspacePage() {
             />
           ) : (
             <div>
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-slate-900">Regions</h3>
-                <Badge tone={assignedCount === regions.length ? "success" : "neutral"}>
-                  {assignedCount} of {regions.length} assigned
-                </Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={assignedCount === regions.length ? "success" : "neutral"}>
+                    {assignedCount} of {regions.length} assigned
+                  </Badge>
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    onClick={runMaterialSuggestions}
+                    disabled={busy || !regions.length}
+                    title="Suggest finishes from catalog (Gemini when API key is set)"
+                  >
+                    {busy && progress.startsWith("Suggesting") ? <Spinner /> : <Icon name="sparkles" />}
+                    Suggest materials
+                  </button>
+                </div>
               </div>
               <ul className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200">
                 {regions.map((r) => {
@@ -894,6 +937,11 @@ export default function ProjectWorkspacePage() {
                         <span className="ml-6 block text-xs text-slate-500">
                           {humanize(r.region_type)} · showing materials suited to this region
                         </span>
+                        {suggestionReasons[r.id] && (
+                          <span className="ml-6 mt-1 block text-xs text-teal-700">
+                            Suggested: {suggestionReasons[r.id]}
+                          </span>
+                        )}
                       </label>
                       <select
                         id={selectId}
@@ -905,6 +953,11 @@ export default function ProjectWorkspacePage() {
                             const next = { ...prev };
                             if (!v) delete next[r.id];
                             else next[r.id] = Number(v);
+                            return next;
+                          });
+                          setSuggestionReasons((prev) => {
+                            const next = { ...prev };
+                            delete next[r.id];
                             return next;
                           });
                         }}
@@ -1232,7 +1285,7 @@ export default function ProjectWorkspacePage() {
       {step === 5 && (
         <StepCard
           title="Downloadable report"
-          description="A PDF with the original photo, redesign, materials, quantities and full cost breakdown — ready for contractor discussions."
+          description="Professional PDF with before/after, materials, quantities, and INR cost totals — ready for contractor discussions."
         >
           <div className="flex flex-col items-start gap-4 rounded-xl border border-brand-200 bg-brand-50 p-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-3">
