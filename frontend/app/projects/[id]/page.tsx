@@ -873,7 +873,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Prefers Replicate ControlNet (photorealistic facade lock). Cloudflare is only a fallback.`
+              ? `Generate a redesigned view using materials in “${activeDesign.name}”. Uses Replicate SDXL img2img from your photo (accurate facade). ControlNet / Cloudflare only if img2img fails.`
               : "Generate a redesigned view of your house using your selected materials."
           }
           actions={
@@ -910,6 +910,9 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[replicate_img2img]") && (
+                  <Badge tone="brand">Replicate img2img</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[replicate_controlnet]") && (
                   <Badge tone="brand">Replicate ControlNet</Badge>
                 )}

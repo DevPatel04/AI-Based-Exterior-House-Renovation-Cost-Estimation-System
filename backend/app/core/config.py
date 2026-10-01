@@ -55,8 +55,12 @@ class Settings(BaseSettings):
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 28
 
-    # Replicate ControlNet (preferred when fal has no free credits)
+    # Replicate redesign (img2img preferred for accuracy; ControlNet as backup)
     replicate_api_token: str = ""
+    enable_replicate_img2img: bool = True
+    replicate_img2img_model: str = "lucataco/sdxl"
+    replicate_img2img_strength: float = 0.42  # lower = closer to original photo
+    replicate_img2img_steps: int = 28
     enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85

@@ -24,6 +24,7 @@ for _name in (
     "app.services.grounded_detect",
     "app.services.cloudflare",
     "app.services.replicate_controlnet",
+    "app.services.replicate_img2img",
 ):
     logging.getLogger(_name).setLevel(logging.INFO)
 

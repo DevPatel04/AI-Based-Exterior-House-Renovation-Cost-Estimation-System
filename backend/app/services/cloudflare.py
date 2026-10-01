@@ -25,29 +25,46 @@ async def generate_redesign(
     """
     Returns (relative_path, engine_used, failure_notes).
 
-    Quality-first order (photorealistic facade lock):
-      1) Replicate SDXL ControlNet (best — keeps real house structure)
-      2) fal.ai ControlNet
-      3) Cloudflare Workers AI (fallback — more “AI look”)
-      4) Hugging Face image-to-image (optional)
-      5) Gemini HQ only if explicitly enabled
-      6) Local PIL fallback only if ALLOW_LOCAL_REDESIGN_FALLBACK=true
+    Quality-first order (photorealistic, accurate facade):
+      1) Replicate SDXL img2img (original photo + moderate strength)
+      2) Replicate SDXL ControlNet (Canny structure lock)
+      3) fal.ai ControlNet
+      4) Cloudflare Workers AI (fallback)
+      5) Hugging Face image-to-image (optional)
+      6) Gemini HQ only if explicitly enabled
+      7) Local PIL fallback only if ALLOW_LOCAL_REDESIGN_FALLBACK=true
     """
     settings = get_settings()
     notes: list[str] = []
+    has_replicate = bool((settings.replicate_api_token or "").strip())
     logger.info(
-        "REDESIGN begin hq=%s replicate=%s fal=%s cloudflare=%s hf=%s gemini_hq=%s local_ok=%s",
+        "REDESIGN begin hq=%s replicate=%s img2img=%s controlnet=%s fal=%s cloudflare=%s hf=%s local_ok=%s",
         hq_mode,
-        bool((settings.replicate_api_token or "").strip() and settings.enable_replicate_controlnet),
+        has_replicate,
+        bool(has_replicate and settings.enable_replicate_img2img),
+        bool(has_replicate and settings.enable_replicate_controlnet),
         bool((settings.fal_key or "").strip() and settings.enable_fal_controlnet),
         bool(settings.cloudflare_account_id and settings.cloudflare_api_token),
         bool((settings.hf_token or "").strip() and settings.enable_hf_img2img),
-        bool(hq_mode and settings.enable_gemini_hq and settings.gemini_api_key),
         bool(settings.allow_local_redesign_fallback),
     )
 
-    # 1) Replicate ControlNet first — photorealistic, structure-preserving
-    if settings.enable_replicate_controlnet and (settings.replicate_api_token or "").strip():
+    # 1) Replicate img2img — best accuracy from the real photo
+    if has_replicate and settings.enable_replicate_img2img:
+        from app.services.replicate_img2img import generate_replicate_img2img_redesign
+
+        logger.info("REDESIGN try replicate_img2img")
+        path, err = await generate_replicate_img2img_redesign(source_path, prompt, hq_mode=hq_mode)
+        if path:
+            logger.info("REDESIGN ok engine=replicate_img2img path=%s", path)
+            return path, "replicate_img2img", notes
+        notes.append(f"replicate_img2img: {err or 'failed'}")
+        logger.warning("REDESIGN fail replicate_img2img err=%s", err)
+    else:
+        notes.append("replicate_img2img: skipped (token missing or ENABLE_REPLICATE_IMG2IMG=false)")
+
+    # 2) Replicate ControlNet — structure lock backup
+    if has_replicate and settings.enable_replicate_controlnet:
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
 
         logger.info("REDESIGN try replicate_controlnet")
@@ -60,7 +77,7 @@ async def generate_redesign(
     else:
         notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
-    # 2) fal ControlNet
+    # 3) fal ControlNet
     if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
         from app.services.fal_controlnet import generate_fal_controlnet_redesign
 
@@ -74,7 +91,7 @@ async def generate_redesign(
     else:
         notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
 
-    # 3) Cloudflare — free fallback (more generative / less faithful)
+    # 4) Cloudflare — free fallback
     if settings.cloudflare_account_id and settings.cloudflare_api_token:
         logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
         path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
