@@ -66,8 +66,9 @@ export default function ProjectWorkspacePage() {
   const [pendingCrop, setPendingCrop] = useState<File | null>(null);
   const [lastQuality, setLastQuality] = useState<{ ok: boolean; message: string } | null>(null);
   const [newDesignName, setNewDesignName] = useState("Design B");
-  const [facadeWidth, setFacadeWidth] = useState("30");
-  const [facadeHeight, setFacadeHeight] = useState("22");
+  const [facadeWidth, setFacadeWidth] = useState("");
+  const [facadeHeight, setFacadeHeight] = useState("");
+  const [facadeHint, setFacadeHint] = useState<string | null>(null);
   const [user, setUser] = useState<any>(null);
   const [redesignVersion, setRedesignVersion] = useState(0);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
@@ -368,7 +369,7 @@ export default function ProjectWorkspacePage() {
       return;
     }
     setBusy(true);
-    setProgress("Suggesting materials…");
+    setProgress("AI suggesting materials from photo…");
     try {
       const res = await api.suggestMaterials(projectId);
       const next: Record<number, number> = { ...assignments };
@@ -381,8 +382,8 @@ export default function ProjectWorkspacePage() {
       setSuggestionReasons(reasons);
       toast.success(
         res.engine === "gemini"
-          ? `AI suggested finishes for ${res.suggestions.length} regions.`
-          : `Catalog suggestions applied to ${res.suggestions.length} regions.`
+          ? `Gemini suggested finishes for ${res.suggestions.length} regions.`
+          : `Catalog fallback used (set GEMINI_API_KEY for AI). ${res.suggestions.length} regions.`
       );
     } catch (err: any) {
       toast.error(err.message || "Could not suggest materials");
@@ -462,17 +463,39 @@ export default function ProjectWorkspacePage() {
   async function runEstimate(e?: FormEvent) {
     e?.preventDefault();
     setBusy(true);
-    setProgress("Calculating areas, quantities and costs…");
+    setProgress("AI estimating facade size, areas, quantities and costs…");
     try {
-      const a = await api.estimateAreas(projectId, {
-        known_width_ft: Number(facadeWidth) || 30,
-        known_height_ft: Number(facadeHeight) || 22,
-      });
+      const body: Record<string, number> = {};
+      const w = Number(facadeWidth);
+      const h = Number(facadeHeight);
+      if (Number.isFinite(w) && w > 0) body.known_width_ft = w;
+      if (Number.isFinite(h) && h > 0) body.known_height_ft = h;
+      const a = await api.estimateAreas(projectId, Object.keys(body).length ? body : {});
       setAreas(a);
+      const aiArea = a.find((x: any) => String(x.method || "").includes("gemini"));
+      const wallNote = a.find((x: any) => x.notes && String(x.notes).includes("AI facade"));
+      const sizeMatch = wallNote?.notes?.match(/AI facade ([\d.]+)[×x]([\d.]+)/);
+      if (sizeMatch && !facadeWidth && !facadeHeight) {
+        setFacadeWidth(sizeMatch[1]);
+        setFacadeHeight(sizeMatch[2]);
+      }
+      if (aiArea) {
+        setFacadeHint(
+          sizeMatch
+            ? `Gemini sized facade ≈ ${sizeMatch[1]}×${sizeMatch[2]} ft and filtered false detections.`
+            : "Areas from Gemini vision (false tiny windows filtered)."
+        );
+      } else {
+        setFacadeHint("AI unavailable — scaled from polygon formula. Set a valid GEMINI_API_KEY for AI estimates.");
+      }
       const c = await api.calculate(projectId);
       setCosts(c);
       setQuantities(await api.listQuantities(projectId));
-      toast.success("Areas, quantities, and costs calculated.");
+      toast.success(
+        aiArea
+          ? "AI estimated areas, quantities, and costs."
+          : "Areas, quantities, and costs calculated."
+      );
     } catch (err: any) {
       toast.error(err.message);
       autoEstimateStarted.current = false;
@@ -1188,10 +1211,10 @@ export default function ProjectWorkspacePage() {
       {step === 4 && (
         <StepCard
           title="Area, quantity & cost"
-          description="Enter the approximate facade size so detected regions can be scaled to real-world measurements."
+          description="Gemini estimates facade size and region areas from the photo. Leave width/height blank for AI, or enter them to override."
         >
           <form onSubmit={runEstimate} className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
-            <Field label="Facade width (ft)">
+            <Field label="Facade width (ft) — optional">
               {(id) => (
                 <input
                   id={id}
@@ -1202,11 +1225,11 @@ export default function ProjectWorkspacePage() {
                   inputMode="decimal"
                   value={facadeWidth}
                   onChange={(e) => setFacadeWidth(e.target.value)}
-                  placeholder="30"
+                  placeholder="AI estimates if empty"
                 />
               )}
             </Field>
-            <Field label="Facade height (ft)">
+            <Field label="Facade height (ft) — optional">
               {(id) => (
                 <input
                   id={id}
@@ -1217,15 +1240,16 @@ export default function ProjectWorkspacePage() {
                   inputMode="decimal"
                   value={facadeHeight}
                   onChange={(e) => setFacadeHeight(e.target.value)}
-                  placeholder="22"
+                  placeholder="AI estimates if empty"
                 />
               )}
             </Field>
             <button className="btn-primary" disabled={busy}>
-              {busy && progress.startsWith("Calculating") ? <Spinner /> : <Icon name="calculator" />}
-              {costs?.lines?.length ? "Recalculate" : "Calculate"}
+              {busy && progress.includes("estimat") ? <Spinner /> : <Icon name="calculator" />}
+              {costs?.lines?.length ? "Recalculate" : "Calculate with AI"}
             </button>
           </form>
+          {facadeHint && <p className="text-sm text-slate-600">{facadeHint}</p>}
 
           {costs && (
             <div className="grid gap-3 sm:grid-cols-3">
@@ -1239,7 +1263,7 @@ export default function ProjectWorkspacePage() {
             <EmptyState
               icon="calculator"
               title="No estimate yet"
-              description="Enter the facade size above and press Calculate to see areas, quantities and costs."
+              description="Press Calculate with AI — Gemini sizes the facade and filters noisy detections. Optional width/height override AI."
             />
           ) : (
             <div className="grid gap-6 xl:grid-cols-2">

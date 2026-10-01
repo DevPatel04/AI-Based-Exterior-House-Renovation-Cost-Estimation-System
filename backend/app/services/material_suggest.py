@@ -1,20 +1,19 @@
 """Suggest materials per facade region from the project catalog.
 
-Uses Gemini (when GEMINI_API_KEY is set) + catalog constraints.
-Falls back to rule-based picks from suitable_regions.
+Uses Gemini vision (REST) when GEMINI_API_KEY is set + catalog constraints.
+Falls back to rule-based picks from suitable_regions only if AI fails.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models import Material, ProjectImage, StructureRegion
+from app.services.gemini import gemini_vision_json
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +28,6 @@ _DEFAULT_BY_REGION: dict[str, list[str]] = {
     "window": ["paint", "panels"],
     "other": ["paint", "texture_finish", "panels"],
 }
-
-
-def _extract_json(text: str) -> list | dict:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
-        if not match:
-            raise
-        return json.loads(match.group(1))
 
 
 def _catalog_materials(db: Session) -> list[Material]:
@@ -83,9 +68,7 @@ def _gemini_suggest(
     catalog: list[Material],
 ) -> dict[int, tuple[int, str]] | None:
     """Return {region_id: (material_id, reason)} or None on failure."""
-    settings = get_settings()
-    key = (settings.gemini_api_key or "").strip()
-    if not key or not regions or not catalog:
+    if not regions or not catalog:
         return None
 
     region_payload = []
@@ -108,35 +91,22 @@ def _gemini_suggest(
         )
 
     prompt = (
-        "You are an exterior renovation consultant. Suggest ONE catalog material per region "
-        "for this house facade. Prefer cohesive finishes (same wall family), climate-sensible "
-        "choices, and materials whose suitable_regions include the region type when listed.\n"
+        "You are an exterior renovation consultant looking at this house photo. "
+        "Suggest ONE catalog material per detected region for a cohesive, climate-sensible facade redesign.\n"
+        "Prefer the same wall-finish family across main_wall / parapet / pillar when suitable.\n"
+        "Windows: frame/trim-friendly finishes only. Gates: durable metal/composite. "
+        "Roof edge: cladding or trim — not random paint.\n"
         "Return ONLY a JSON array:\n"
         '[{"region_id": number, "material_id": number, "reason": "short why"}]\n'
-        "Use only material_id values from the catalog. One suggestion per region_id.\n\n"
+        "Use only material_id values from the catalog. One suggestion per region_id. "
+        "Prefer materials whose suitable_regions include the region type.\n\n"
         f"REGIONS:\n{json.dumps(region_payload)}\n\n"
         f"CATALOG:\n{json.dumps(mat_payload)}"
     )
 
-    model_name = (settings.gemini_model or "gemini-3.8-flash").strip()
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config={"temperature": 0.3, "response_mime_type": "application/json"},
-        )
-        parts: list = []
-        if image_path and image_path.exists():
-            parts.append(genai.upload_file(str(image_path)))
-        parts.append(prompt)
-        result = model.generate_content(parts)
-        data = _extract_json((result.text or "").strip())
-    except Exception as exc:
-        logger.warning("MATERIAL suggest gemini failed: %s", exc)
+    data = gemini_vision_json(prompt, image_path, temperature=0.25)
+    if data is None:
         return None
-
     if isinstance(data, dict):
         data = data.get("suggestions") or data.get("items") or []
     if not isinstance(data, list):
@@ -157,6 +127,8 @@ def _gemini_suggest(
             continue
         reason = str(item.get("reason") or "AI suggestion").strip()[:180]
         out[rid] = (mid, reason or "AI suggestion")
+    if out:
+        logger.info("MATERIAL suggest gemini regions=%s", len(out))
     return out or None
 
 
@@ -172,9 +144,7 @@ def suggest_materials_for_project(db: Session, project_id: int) -> list[dict]:
         .all()
     )
     catalog = _catalog_materials(db)
-    if not regions:
-        return []
-    if not catalog:
+    if not regions or not catalog:
         return []
 
     primary = (
@@ -194,20 +164,21 @@ def suggest_materials_for_project(db: Session, project_id: int) -> list[dict]:
     ai_map = _gemini_suggest(image_path, regions, catalog)
     source = "gemini" if ai_map else "rules"
     if not ai_map:
-        logger.info("MATERIAL suggest using rule-based fallback")
+        logger.info("MATERIAL suggest using rule-based fallback (set a valid GEMINI_API_KEY for AI)")
 
     mat_by_id = {m.id: m for m in catalog}
     results: list[dict] = []
     for r in regions:
         rtype = r.region_type.value if hasattr(r.region_type, "value") else str(r.region_type)
+        used_ai = False
         if ai_map and r.id in ai_map:
             mid, reason = ai_map[r.id]
             mat = mat_by_id.get(mid)
             if mat and not _suited(mat, rtype):
-                # Prefer suited materials even if AI picked poorly
                 alt, alt_reason = _rule_pick(r, catalog)
                 if alt:
                     mat, reason, mid = alt, f"{reason} (adjusted to suited catalog)", alt.id
+            used_ai = mat is not None
         else:
             mat, reason = _rule_pick(r, catalog)
             mid = mat.id if mat else None
@@ -224,7 +195,7 @@ def suggest_materials_for_project(db: Session, project_id: int) -> list[dict]:
                 if hasattr(mat.material_type, "value")
                 else str(mat.material_type),
                 "reason": reason,
-                "source": source if (ai_map and r.id in ai_map) else ("rules" if not ai_map else "gemini"),
+                "source": "gemini" if used_ai else ("rules" if not ai_map else "rules"),
             }
         )
     return results

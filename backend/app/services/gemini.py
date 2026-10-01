@@ -372,6 +372,103 @@ def _gemini_key_invalid_message(resp_text: str = "") -> str | None:
     return None
 
 
+def gemini_vision_json(
+    prompt: str,
+    image_path: Path | None = None,
+    *,
+    temperature: float = 0.2,
+    models: list[str] | None = None,
+) -> list | dict | None:
+    """
+    Call Gemini generateContent (REST) with optional image; expect JSON text.
+    Returns parsed JSON or None on failure (logs reason).
+    """
+    import base64
+    import io
+
+    import httpx
+    from PIL import Image
+
+    settings = get_settings()
+    key = (settings.gemini_api_key or "").strip()
+    if not key:
+        logger.warning("gemini_vision_json: GEMINI_API_KEY not set")
+        return None
+
+    configured = (settings.gemini_model or "gemini-2.5-flash").strip()
+    model_list: list[str] = []
+    for m in (models or []) + [configured, "gemini-2.5-flash", "gemini-2.0-flash"]:
+        if m and m not in model_list and not m.endswith("-image"):
+            model_list.append(m)
+
+    image_b64: str | None = None
+    if image_path is not None and image_path.exists():
+        try:
+            pil = Image.open(image_path).convert("RGB")
+            pil.thumbnail((1280, 1280))
+            buf = io.BytesIO()
+            pil.save(buf, format="JPEG", quality=88)
+            image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as exc:
+            logger.warning("gemini_vision_json: image read failed: %s", exc)
+
+    parts: list[dict] = []
+    if image_b64:
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": image_b64}})
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "temperature": temperature,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    errors: list[str] = []
+    with httpx.Client(timeout=90.0) as client:
+        for model_name in model_list:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model_name}:generateContent?key={key}"
+            )
+            try:
+                resp = client.post(url, json=payload)
+            except Exception as exc:
+                errors.append(f"{model_name}: {exc}"[:140])
+                continue
+            if resp.status_code >= 400:
+                bad = _gemini_key_invalid_message(resp.text)
+                if bad:
+                    logger.error("gemini_vision_json: %s", bad)
+                    return None
+                errors.append(f"{model_name}: HTTP {resp.status_code} {resp.text[:100]}")
+                if resp.status_code in {401, 403, 404}:
+                    continue
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                errors.append(f"{model_name}: non-json")
+                continue
+            text = ""
+            for cand in body.get("candidates") or []:
+                for part in (cand.get("content") or {}).get("parts") or []:
+                    if isinstance(part.get("text"), str):
+                        text += part["text"]
+            if not text.strip():
+                errors.append(f"{model_name}: empty")
+                continue
+            try:
+                return _extract_json(text.strip())
+            except Exception as parse_exc:
+                errors.append(f"{model_name}: parse {parse_exc}"[:140])
+                continue
+
+    logger.warning("gemini_vision_json failed: %s", " | ".join(errors[:3]) or "unknown")
+    return None
+
+
 def _detect_gemini_sync(image_path: Path) -> list[dict]:
     """Gemini vision structure boxes via REST (inline image + JSON)."""
     import base64

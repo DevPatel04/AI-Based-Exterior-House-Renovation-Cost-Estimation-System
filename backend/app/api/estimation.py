@@ -4,11 +4,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
 from app.core.database import get_db
-from app.models import AreaEstimate, ProjectImage, QuantityLine, RateOverride, RegionType, User
+from app.models import AreaEstimate, ProjectImage, QuantityLine, RateOverride, User
 from app.schemas import (
     AreaEstimateOut,
     AreaOverrideIn,
-    CostLineOut,
     CostSummaryOut,
     QuantityLineOut,
     QuantityOverrideIn,
@@ -34,38 +33,59 @@ async def run_area_estimation(
         .filter(ProjectImage.project_id == project.id, ProjectImage.is_primary.is_(True))
         .first()
     )
+    if image is None:
+        image = db.query(ProjectImage).filter(ProjectImage.project_id == project.id).first()
+
     refs = refs or ReferenceMeasurements()
+    known_w = refs.known_width_ft
+    known_h = refs.known_height_ft
+    image_path = absolute_path(image.file_path) if image else None
+
+    # Prefer Gemini QS for facade size + per-region areas (skip noise boxes)
+    ai_estimate = None
+    if image_path is not None and image_path.exists():
+        from app.services.ai_estimate import estimate_facade_and_areas_ai
+
+        ai_estimate = estimate_facade_and_areas_ai(
+            image_path,
+            list(project.regions),
+            known_width_ft=known_w,
+            known_height_ft=known_h,
+        )
+
     depth_info = None
-    # Skip slow HF/Replicate depth when the user already provided facade size
-    has_refs = bool(refs.known_width_ft and refs.known_height_ft)
-    if image is not None and not has_refs:
-        from app.services.depth_scale import refine_facade_scale
+    if ai_estimate is None:
+        has_refs = bool(known_w and known_h)
+        if image is not None and not has_refs:
+            from app.services.depth_scale import refine_facade_scale
 
-        depth_info = await refine_facade_scale(
-            absolute_path(image.file_path),
-            image_width=image.width_px,
-            image_height=image.height_px,
-            known_width_ft=refs.known_width_ft,
-            known_height_ft=refs.known_height_ft,
-        )
-    elif image is not None and has_refs:
-        from app.services.depth_scale import DepthScaleInfo
+            depth_info = await refine_facade_scale(
+                image_path,
+                image_width=image.width_px if image else None,
+                image_height=image.height_px if image else None,
+                known_width_ft=known_w,
+                known_height_ft=known_h,
+            )
+        elif image is not None and has_refs:
+            from app.services.depth_scale import DepthScaleInfo
 
-        depth_info = DepthScaleInfo(
-            facade_width_ft=float(refs.known_width_ft),
-            facade_height_ft=float(refs.known_height_ft),
-            depth_map=None,
-            method="user_reference",
-            confidence=0.95,
-        )
+            depth_info = DepthScaleInfo(
+                facade_width_ft=float(known_w),
+                facade_height_ft=float(known_h),
+                depth_map=None,
+                method="user_reference",
+                confidence=0.95,
+            )
+
     return estimate_areas(
         db,
         project,
         image.width_px if image else None,
         image.height_px if image else None,
-        known_width_ft=refs.known_width_ft,
-        known_height_ft=refs.known_height_ft,
+        known_width_ft=known_w,
+        known_height_ft=known_h,
         depth_info=depth_info,
+        ai_estimate=ai_estimate,
     )
 
 
@@ -126,7 +146,11 @@ def calculate(
     db: Session = Depends(get_db),
 ):
     project = _get_project_for_edit(db, project_id, user)
-    result = calculate_quantities_and_costs(db, project)
+    result = calculate_quantities_and_costs(
+        db,
+        project,
+        use_ai_quantities=True,
+    )
     return CostSummaryOut(
         lines=result["costs"],
         material_total=result["material_total"],
@@ -159,8 +183,7 @@ def override_quantity(
     line.final_quantity = payload.final_quantity
     line.user_override = True
     db.commit()
-    # Recalc costs with overrides preserved
-    calculate_quantities_and_costs(db, project)
+    calculate_quantities_and_costs(db, project, use_ai_quantities=False)
     db.refresh(line)
     return line
 
@@ -193,7 +216,7 @@ def set_rates(
             )
         )
     db.commit()
-    result = calculate_quantities_and_costs(db, project)
+    result = calculate_quantities_and_costs(db, project, use_ai_quantities=False)
     return CostSummaryOut(
         lines=result["costs"],
         material_total=result["material_total"],
