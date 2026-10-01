@@ -1,4 +1,4 @@
-"""High-accuracy Replicate fallbacks when Hugging Face SegFormer is unreachable.
+"""High-accuracy Replicate fallbacks when Hugging Face SegFormer is weak/unreachable.
 
 1) schananas/grounded_sam — per-class mask_prompt (windows, doors, walls, …)
 2) adirik/grounding-dino — open-vocab boxes for openings if masks are thin
@@ -31,7 +31,6 @@ from app.services.segformer import (
 
 logger = logging.getLogger(__name__)
 
-# One Grounded-SAM call per class → accurate part masks (not a single wall blob)
 _CLASS_PROMPTS: list[tuple[str, str]] = [
     ("house facade wall, building wall", RegionType.main_wall.value),
     ("window, window pane, glass window", RegionType.window.value),
@@ -40,6 +39,13 @@ _CLASS_PROMPTS: list[tuple[str, str]] = [
     ("roof edge, roofline, cornice", RegionType.roof_edge.value),
     ("railing, fence rail", RegionType.railing.value),
     ("pillar, column", RegionType.pillar.value),
+]
+
+_OPENING_PROMPTS: list[tuple[str, str]] = [
+    ("window, window pane, glass window", RegionType.window.value),
+    ("door, entrance door, front door", RegionType.gate.value),
+    ("balcony, porch", RegionType.balcony.value),
+    ("roof edge, roofline", RegionType.roof_edge.value),
 ]
 
 
@@ -133,7 +139,80 @@ def _load_mask(url_or_data: str, width: int, height: int, client: httpx.Client) 
         return None
 
 
-def _detect_grounded_sync(image_path: Path) -> list[dict]:
+def _run_prompt_set(
+    client: httpx.Client,
+    token: str,
+    gsam_model: str,
+    data_uri: str,
+    width: int,
+    height: int,
+    prompts: list[tuple[str, str]],
+) -> list[dict]:
+    collected: list[dict] = []
+    for prompt, rtype in prompts:
+        output = _replicate_predict(
+            client,
+            token,
+            gsam_model,
+            {
+                "image": data_uri,
+                "mask_prompt": prompt,
+                "negative_mask_prompt": "sky, tree, person, car, grass, ground",
+            },
+        )
+        if output is None:
+            output = _replicate_predict(
+                client,
+                token,
+                gsam_model,
+                {"image": data_uri, "keywords": prompt},
+            )
+        if output is None:
+            continue
+
+        before = len(collected)
+        for mask_url in _masks_from_output(output):
+            arr = _load_mask(mask_url, width, height, client)
+            if arr is None:
+                continue
+            if float(np.mean(arr > 127)) < 0.001:
+                continue
+            collected.extend(
+                _mask_to_regions(arr, rtype, _pretty_label(rtype, rtype), 0.78, max_parts=12)
+            )
+        for r in collected[before:]:
+            r["source"] = "replicate_grounded_sam"
+    return collected
+
+
+def _maybe_dino(
+    client: httpx.Client,
+    token: str,
+    data_uri: str,
+    width: int,
+    height: int,
+    collected: list[dict],
+) -> list[dict]:
+    windows = sum(1 for r in collected if r["region_type"] == RegionType.window.value)
+    if windows >= 2:
+        return collected
+    settings = get_settings()
+    dino_model = (settings.replicate_dino_model or "adirik/grounding-dino").strip()
+    dino_out = _replicate_predict(
+        client,
+        token,
+        dino_model,
+        {
+            "image": data_uri,
+            "query": "window . door . balcony . railing . pillar . roof",
+            "box_threshold": 0.22,
+            "text_threshold": 0.18,
+        },
+    )
+    return collected + _parse_dino_output(dino_out, width, height)
+
+
+def _detect_grounded_sync(image_path: Path, openings_only: bool = False) -> list[dict]:
     settings = get_settings()
     token = (settings.replicate_api_token or "").strip()
     if not token:
@@ -143,60 +222,11 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
 
     data_uri, width, height = _image_data_uri(image_path)
     gsam_model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
-    collected: list[dict] = []
+    prompts = _OPENING_PROMPTS if openings_only else _CLASS_PROMPTS
 
     with httpx.Client(timeout=180.0) as client:
-        for prompt, rtype in _CLASS_PROMPTS:
-            output = _replicate_predict(
-                client,
-                token,
-                gsam_model,
-                {
-                    "image": data_uri,
-                    "mask_prompt": prompt,
-                    "negative_mask_prompt": "sky, tree, person, car, grass, ground",
-                },
-            )
-            # Alternate schema used by some Grounded-SAM forks
-            if output is None:
-                output = _replicate_predict(
-                    client,
-                    token,
-                    gsam_model,
-                    {"image": data_uri, "keywords": prompt},
-                )
-            if output is None:
-                continue
-
-            for mask_url in _masks_from_output(output):
-                arr = _load_mask(mask_url, width, height, client)
-                if arr is None:
-                    continue
-                # Skip near-empty masks
-                if float(np.mean(arr > 127)) < 0.001:
-                    continue
-                collected.extend(
-                    _mask_to_regions(arr, rtype, _pretty_label(rtype, rtype), 0.78, max_parts=12)
-                )
-                for r in collected[-12:]:
-                    r["source"] = "replicate_grounded_sam"
-
-        # If windows/doors still missing, use Grounding DINO boxes (high recall on openings)
-        windows = sum(1 for r in collected if r["region_type"] == RegionType.window.value)
-        if windows < 2:
-            dino_model = (settings.replicate_dino_model or "adirik/grounding-dino").strip()
-            dino_out = _replicate_predict(
-                client,
-                token,
-                dino_model,
-                {
-                    "image": data_uri,
-                    "query": "window . door . balcony . railing . pillar . roof",
-                    "box_threshold": 0.25,
-                    "text_threshold": 0.20,
-                },
-            )
-            collected.extend(_parse_dino_output(dino_out, width, height))
+        collected = _run_prompt_set(client, token, gsam_model, data_uri, width, height, prompts)
+        collected = _maybe_dino(client, token, data_uri, width, height, collected)
 
     merged = _merge_region_lists(collected)
     if not merged:
@@ -205,7 +235,8 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
             "Try another photo or draw regions manually."
         )
     logger.info(
-        "Replicate detect → %s regions (%s non-wall)",
+        "Replicate detect (%s) → %s regions (%s non-wall)",
+        "openings" if openings_only else "full",
         len(merged),
         sum(1 for r in merged if r["region_type"] != RegionType.main_wall.value),
     )
@@ -242,9 +273,6 @@ def _parse_dino_output(output, width: int, height: int) -> list[dict]:
         if not box or len(box) < 4:
             continue
         x0, y0, x1, y1 = [float(v) for v in box[:4]]
-        # Some APIs return cx,cy,w,h
-        if det.get("bbox_format") == "cxcywh" or (x1 < x0 or y1 < y0):
-            continue
         if max(x0, y0, x1, y1) > 1.5:
             x0, x1 = x0 / width, x1 / width
             y0, y1 = y0 / height, y1 / height
@@ -288,5 +316,5 @@ def _label_to_type(label: str) -> str | None:
     return None
 
 
-async def detect_grounded_regions(image_path: Path) -> list[dict]:
-    return await run_in_threadpool(_detect_grounded_sync, image_path)
+async def detect_grounded_regions(image_path: Path, openings_only: bool = False) -> list[dict]:
+    return await run_in_threadpool(_detect_grounded_sync, image_path, openings_only)

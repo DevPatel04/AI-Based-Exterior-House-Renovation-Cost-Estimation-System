@@ -2,8 +2,9 @@
 
 ADE SegFormer often labels the whole house as one "building" mask.
 We therefore:
-  1) Run ADE + CMP models and merge labels
-  2) Enrich walls-only results with OpenCV window/door/roof candidates
+  1) Run CMP facade + ADE models and merge labels
+  2) Punch opening masks out of the wall so windows stay separate
+  3) Caller may enrich with Replicate Grounded-SAM / DINO when openings are thin
 """
 
 from __future__ import annotations
@@ -189,21 +190,29 @@ def _mask_to_regions(
         RegionType.gate.value,
         RegionType.railing.value,
         RegionType.pillar.value,
+        RegionType.balcony.value,
     }
     binary = _clean_mask(mask, soft=soft)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # TREE finds separate window panes inside larger facade blobs
+    mode = cv2.RETR_TREE if soft else cv2.RETR_EXTERNAL
+    contours, _ = cv2.findContours(binary, mode, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return []
 
     if min_area_frac is None:
         if region_type == RegionType.main_wall.value:
-            min_area_frac = 0.015
+            min_area_frac = 0.02
         elif region_type == RegionType.window.value:
-            min_area_frac = 0.0005
-        elif region_type in {RegionType.gate.value, RegionType.pillar.value, RegionType.railing.value, RegionType.balcony.value}:
-            min_area_frac = 0.001
+            min_area_frac = 0.00035
+        elif region_type in {
+            RegionType.gate.value,
+            RegionType.pillar.value,
+            RegionType.railing.value,
+            RegionType.balcony.value,
+        }:
+            min_area_frac = 0.0008
         else:
-            min_area_frac = 0.003
+            min_area_frac = 0.002
 
     min_area = h * w * min_area_frac
     scored = []
@@ -211,14 +220,25 @@ def _mask_to_regions(
         area = float(cv2.contourArea(c))
         if area < min_area:
             continue
+        if region_type != RegionType.main_wall.value and area > h * w * 0.45:
+            continue
         scored.append((area, c))
     scored.sort(key=lambda t: t[0], reverse=True)
 
     out: list[dict] = []
     for i, (_area, contour) in enumerate(scored[:max_parts]):
-        # Prefer axis-aligned boxes for windows/doors (more editable in Konva)
-        if region_type in {RegionType.window.value, RegionType.gate.value}:
+        if region_type in {
+            RegionType.window.value,
+            RegionType.gate.value,
+            RegionType.balcony.value,
+            RegionType.pillar.value,
+        }:
             x, y, bw, bh = cv2.boundingRect(contour)
+            if bw < 8 or bh < 8:
+                continue
+            aspect = bw / max(1, bh)
+            if region_type == RegionType.window.value and not (0.25 <= aspect <= 4.5):
+                continue
             points = _bbox_points(x, y, x + bw, y + bh, w, h)
         else:
             points = _contour_to_points(contour, w, h)
@@ -276,7 +296,8 @@ def _poly_area(points: list[dict]) -> float:
 
 
 def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
-    regions: list[dict] = []
+    """Parse HF masks; punch openings out of wall so the wall doesn't swallow windows."""
+    by_type: dict[str, list[tuple[np.ndarray, float, str]]] = {}
     items = payload if isinstance(payload, list) else [payload]
     for item in items:
         if not isinstance(item, dict):
@@ -285,13 +306,32 @@ def _parse_hf_segmentation(payload, width: int, height: int) -> list[dict]:
         rtype = _map_label(label)
         if not rtype:
             continue
-        score = item.get("score")
-        if score is None:
-            score = 0.75
+        score = float(item.get("score") if item.get("score") is not None else 0.75)
         mask = _decode_mask(item.get("mask"), height, width)
         if mask is None:
             continue
-        regions.extend(_mask_to_regions(mask, rtype, _pretty_label(rtype, label), float(score)))
+        by_type.setdefault(rtype, []).append((mask, score, label))
+
+    opening_types = {
+        RegionType.window.value,
+        RegionType.gate.value,
+        RegionType.balcony.value,
+        RegionType.railing.value,
+        RegionType.pillar.value,
+    }
+    openings = np.zeros((height, width), dtype=np.uint8)
+    for rtype in opening_types:
+        for mask, _score, _label in by_type.get(rtype, []):
+            openings = np.maximum(openings, (mask > 127).astype(np.uint8) * 255)
+
+    regions: list[dict] = []
+    for rtype, entries in by_type.items():
+        for mask, score, label in entries:
+            work = mask
+            if rtype == RegionType.main_wall.value and openings.any():
+                work = mask.copy()
+                work[openings > 0] = 0
+            regions.extend(_mask_to_regions(work, rtype, _pretty_label(rtype, label), score))
 
     walls = [r for r in regions if r["region_type"] == RegionType.main_wall.value]
     others = [r for r in regions if r["region_type"] != RegionType.main_wall.value]
@@ -337,7 +377,14 @@ def _merge_region_lists(*lists: list[dict]) -> list[dict]:
 
     kept: list[dict] = []
     # Prefer model masks over OpenCV heuristics when overlapping
-    source_rank = {"gemini_refine": 4, "gemini_vision": 3, "segformer": 2, "grounded_sam": 2}
+    source_rank = {
+        "gemini_refine": 5,
+        "gemini_vision": 4,
+        "replicate_grounded_sam": 4,
+        "replicate_grounding_dino": 3,
+        "segformer": 2,
+        "grounded_sam": 2,
+    }
 
     def _rank(r: dict) -> tuple:
         return (

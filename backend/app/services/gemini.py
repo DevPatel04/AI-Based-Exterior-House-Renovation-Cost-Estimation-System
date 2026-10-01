@@ -208,12 +208,16 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
             logger.exception("HF SegFormer detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
-    # Always use Replicate high-accuracy fallback when HF failed or only returned wall(s)
-    if (not regions or non_wall < 2) and (settings.replicate_api_token or "").strip():
+    windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
+    # Enrich whenever SegFormer is missing / wall-heavy (ADE often misses windows)
+    need_enrich = (not regions) or non_wall < 2 or windows < 2
+    if need_enrich and (settings.replicate_api_token or "").strip():
         try:
             from app.services.grounded_detect import detect_grounded_regions
 
-            grounded = await detect_grounded_regions(image_path)
+            # Keep SegFormer wall; only ask Replicate for openings when we already have a wall
+            openings_only = bool(regions) and windows < 2
+            grounded = await detect_grounded_regions(image_path, openings_only=openings_only)
             regions = _merge_region_lists(regions, grounded) if regions else grounded
         except StructureDetectError as exc:
             errors.append(str(exc))
