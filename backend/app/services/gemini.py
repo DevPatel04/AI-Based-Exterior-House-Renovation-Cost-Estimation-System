@@ -90,10 +90,12 @@ Return ONLY a JSON array of improved regions. Each item:
 
 Rules:
 - Fit polygons tightly to visible walls, windows, doors/gates, balconies, pillars, railings, parapet, roof edges.
-- Remove false boxes on sky, trees, ground, cars.
+- Prefer RECALL: include every clearly visible window, door, balcony, railing, pillar, and roof edge.
+- Remove only obvious false boxes on sky, trees, ground, or cars.
 - Keep the main facade wall as one (or two) polygon(s).
 - Separate each window; do not merge all windows into one box.
-- Prefer accuracy over quantity. If unsure, omit.
+- If a draft region is roughly correct, keep/adjust it rather than drop it.
+- It is better to include a slightly imperfect window box than to miss a window.
 """
     try:
         import google.generativeai as genai
@@ -139,9 +141,14 @@ Rules:
                     "source": "gemini_refine",
                 }
             )
-        # Require at least a wall + one other part to accept refine
+        # Accept refine when it finds at least as many useful parts
         types = {c["region_type"] for c in cleaned}
-        if "main_wall" in types and len(cleaned) >= 2:
+        draft_parts = sum(1 for r in regions if r.get("region_type") != "main_wall")
+        refined_parts = sum(1 for c in cleaned if c["region_type"] != "main_wall")
+        if "main_wall" in types and refined_parts >= max(2, draft_parts - 1):
+            return cleaned
+        # If Gemini returns more openings, prefer it even without perfect wall label
+        if refined_parts > draft_parts and refined_parts >= 3:
             return cleaned
         return regions
     except Exception:

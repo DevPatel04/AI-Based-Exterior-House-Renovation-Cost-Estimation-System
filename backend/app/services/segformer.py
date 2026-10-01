@@ -199,9 +199,9 @@ def _mask_to_regions(
         if region_type == RegionType.main_wall.value:
             min_area_frac = 0.015
         elif region_type == RegionType.window.value:
-            min_area_frac = 0.0008
-        elif region_type in {RegionType.gate.value, RegionType.pillar.value, RegionType.railing.value}:
-            min_area_frac = 0.0015
+            min_area_frac = 0.0005
+        elif region_type in {RegionType.gate.value, RegionType.pillar.value, RegionType.railing.value, RegionType.balcony.value}:
+            min_area_frac = 0.001
         else:
             min_area_frac = 0.003
 
@@ -411,17 +411,17 @@ def _box_contrast_score(gray: np.ndarray, rx: int, ry: int, rw: int, rh: int) ->
 def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list[dict]:
     """
     Find rectangular openings (windows/doors) + roof band inside the facade bbox.
-    Used when SegFormer misses parts; scored by shape + contrast so false boxes drop.
+    Tuned for recall: catch most openings; light filters remove obvious junk.
     """
     windows = sum(1 for r in regions if r["region_type"] == RegionType.window.value)
-    # If SegFormer already found several windows, don't spam OpenCV extras
-    if windows >= 3:
+    # Only skip enrich when we already have a solid set of windows
+    if windows >= 5:
         return regions
 
     h, w = image_rgb.shape[:2]
     x0, y0, x1, y1 = _wall_bbox_px(regions, w, h)
-    pad_x = int((x1 - x0) * 0.05)
-    pad_y = int((y1 - y0) * 0.08)
+    pad_x = int((x1 - x0) * 0.03)
+    pad_y = int((y1 - y0) * 0.05)
     x0, y0 = max(0, x0 + pad_x), max(0, y0 + pad_y)
     x1, y1 = min(w - 1, x1 - pad_x), min(h - 1, y1 - pad_y)
     if x1 - x0 < 40 or y1 - y0 < 40:
@@ -430,8 +430,8 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     crop = image_rgb[y0:y1, x0:x1]
     gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 140)
-    edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+    edges = cv2.Canny(blur, 35, 120)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     facade_area = float(max(1, (x1 - x0) * (y1 - y0)))
@@ -439,45 +439,46 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
 
     for c in contours:
         area = float(cv2.contourArea(c))
-        if area < facade_area * 0.004 or area > facade_area * 0.18:
+        if area < facade_area * 0.002 or area > facade_area * 0.22:
             continue
         rx, ry, rw, rh = cv2.boundingRect(c)
-        if rw < 20 or rh < 20:
+        if rw < 14 or rh < 14:
             continue
         aspect = rw / max(1, rh)
         rectangularity = area / max(1.0, float(rw * rh))
-        if rectangularity < 0.42 or not (0.45 <= aspect <= 2.6):
+        if rectangularity < 0.30 or not (0.35 <= aspect <= 3.0):
             continue
 
-        # Prefer approx-quad contours (window frames)
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.04 * peri, True)
-        quad_bonus = 0.15 if 4 <= len(approx) <= 6 else 0.0
+        quad_bonus = 0.12 if 4 <= len(approx) <= 8 else 0.0
 
         abs_x0, abs_y0 = x0 + rx, y0 + ry
         abs_x1, abs_y1 = abs_x0 + rw, abs_y0 + rh
-        # Reject boxes glued to facade outer frame
-        margin = 6
-        if abs_x0 <= x0 + margin or abs_y0 <= y0 + margin or abs_x1 >= x1 - margin or abs_y1 >= y1 - margin:
+        margin = 4
+        # Allow near-edge boxes unless they are huge (likely facade outline)
+        if (
+            abs_x0 <= x0 + margin or abs_y0 <= y0 + margin or abs_x1 >= x1 - margin or abs_y1 >= y1 - margin
+        ) and area > facade_area * 0.12:
             continue
 
         contrast = _box_contrast_score(gray, rx, ry, rw, rh)
-        if contrast < 0.18:
+        if contrast < 0.10:
             continue
 
         cy = ((abs_y0 + abs_y1) / 2) / h
         points = _bbox_points(abs_x0, abs_y0, abs_x1, abs_y1, w, h)
 
-        if aspect < 0.7 and rh > rw * 1.4 and cy > 0.52:
+        if aspect < 0.7 and rh > rw * 1.3 and cy > 0.48:
             rtype = RegionType.gate.value
             label = "Door / gate"
         else:
             rtype = RegionType.window.value
             label = "Window"
 
-        score = 0.35 * rectangularity + 0.45 * contrast + quad_bonus
-        score *= min(1.0, area / (facade_area * 0.015))
-        if score < 0.28:
+        score = 0.30 * rectangularity + 0.40 * contrast + quad_bonus
+        score *= min(1.0, area / (facade_area * 0.01))
+        if score < 0.18:
             continue
 
         candidates.append(
@@ -496,7 +497,6 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
 
     candidates.sort(key=lambda t: t[0], reverse=True)
 
-    # Keep windows with similar size (true window grids); drop outliers
     win_areas = [c[1]["_area_norm"] for c in candidates if c[1]["region_type"] == RegionType.window.value]
     median_area = float(np.median(win_areas)) if win_areas else 0.0
 
@@ -504,45 +504,69 @@ def enrich_with_opencv_parts(image_rgb: np.ndarray, regions: list[dict]) -> list
     for score, reg in candidates:
         rtype = reg["region_type"]
         if rtype == RegionType.window.value:
-            if sum(1 for a in added if a["region_type"] == RegionType.window.value) >= 5:
+            if sum(1 for a in added if a["region_type"] == RegionType.window.value) >= 10:
                 continue
+            # Soft size filter — keep more recall than before
             if median_area > 0 and (
-                reg["_area_norm"] < median_area * 0.35 or reg["_area_norm"] > median_area * 3.5
+                reg["_area_norm"] < median_area * 0.2 or reg["_area_norm"] > median_area * 5.0
             ):
                 continue
-        if rtype == RegionType.gate.value and any(a["region_type"] == RegionType.gate.value for a in added):
+        if rtype == RegionType.gate.value and sum(1 for a in added if a["region_type"] == RegionType.gate.value) >= 2:
             continue
-        if any(_iou_norm(a["points"], reg["points"]) > 0.35 for a in added):
+        if any(_iou_norm(a["points"], reg["points"]) > 0.45 for a in added):
             continue
         if any(
-            r["region_type"] != RegionType.main_wall.value and _iou_norm(r["points"], reg["points"]) > 0.35
+            r["region_type"] != RegionType.main_wall.value and _iou_norm(r["points"], reg["points"]) > 0.45
             for r in regions
         ):
             continue
         clean = {k: v for k, v in reg.items() if not k.startswith("_")}
         added.append(clean)
 
-    # Roof only if none present and wall top looks like an edge band
     if not any(r["region_type"] == RegionType.roof_edge.value for r in regions + added):
         band_h = max(10, int((y1 - y0) * 0.07))
-        top = gray[0 : min(gray.shape[0], band_h + 4), :]
-        if top.size and float(np.mean(cv2.Canny(top, 40, 120))) > 12:
-            added.append(
-                {
-                    "region_type": RegionType.roof_edge.value,
-                    "label": "Roof edge",
-                    "points": _bbox_points(x0, max(0, y0 - band_h // 3), x1, y0 + band_h, w, h),
-                    "confidence": 0.48,
-                    "source": "opencv_enrich",
-                }
-            )
+        added.append(
+            {
+                "region_type": RegionType.roof_edge.value,
+                "label": "Roof edge",
+                "points": _bbox_points(x0, max(0, y0 - band_h // 3), x1, y0 + band_h, w, h),
+                "confidence": 0.48,
+                "source": "opencv_enrich",
+            }
+        )
+
+    # Balcony heuristic: wide mid-height rectangle with railing-like edge density
+    if not any(r["region_type"] == RegionType.balcony.value for r in regions + added):
+        mid_y0 = int((y1 - y0) * 0.40)
+        mid_y1 = int((y1 - y0) * 0.72)
+        mid = gray[mid_y0:mid_y1, :]
+        if mid.size:
+            mid_edges = cv2.Canny(mid, 40, 120)
+            # horizontal projection — balcony rails often make a strong horizontal band
+            row_sum = mid_edges.mean(axis=1) if mid_edges.size else np.array([])
+            if row_sum.size and float(row_sum.max()) > 18:
+                by = int(np.argmax(row_sum))
+                bh = max(20, int((y1 - y0) * 0.12))
+                abs_y0 = y0 + max(0, mid_y0 + by - bh // 2)
+                abs_y1 = min(h - 1, abs_y0 + bh)
+                bx0 = x0 + int((x1 - x0) * 0.15)
+                bx1 = x0 + int((x1 - x0) * 0.85)
+                added.append(
+                    {
+                        "region_type": RegionType.balcony.value,
+                        "label": "Balcony",
+                        "points": _bbox_points(bx0, abs_y0, bx1, abs_y1, w, h),
+                        "confidence": 0.42,
+                        "source": "opencv_enrich",
+                    }
+                )
 
     wins = [a for a in added if a["region_type"] == RegionType.window.value]
     for i, a in enumerate(wins, start=1):
         a["label"] = f"Window {i}" if len(wins) > 1 else "Window"
 
     if added:
-        logger.info("OpenCV enrich added %s high-score parts", len(added))
+        logger.info("OpenCV enrich added %s parts (recall-focused)", len(added))
     return _merge_region_lists(regions, added)
 
 
