@@ -103,6 +103,7 @@ _SKIP = {
 
 # Higher = preferred when overlapping same-type boxes
 _SOURCE_RANK = {
+    "gemini_detect": 110,
     "cmp": 100,
     "grounded_sam": 80,
     "ade": 60,

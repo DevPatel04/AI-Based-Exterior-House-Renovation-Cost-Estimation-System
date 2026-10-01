@@ -939,7 +939,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Redesign with Cloudflare Workers AI — materials on “${activeDesign.name}”.`
+              ? `Redesign with Gemini (Nano Banana) then Cloudflare — materials on “${activeDesign.name}”.`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
@@ -976,11 +976,17 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[gemini_image]") && (
+                  <Badge tone="violet">Gemini Nano Banana</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[cloudflare]") && (
                   <Badge tone="brand">Cloudflare Lightning</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("scene_describe=") && (
                   <Badge tone="neutral">Photo describe</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("gemini_model=") && (
+                  <Badge tone="neutral">Paid Gemini</Badge>
                 )}
               </figcaption>
               {activeDesign?.redesign_path ? (

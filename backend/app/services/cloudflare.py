@@ -33,9 +33,10 @@ async def generate_redesign(
     assignments: list | None = None,
 ) -> tuple[str, str, list[str]]:
     """
-    Cloudflare Workers AI only — return the real model output as-is.
-
-    No region paint, no photo blend, no local/manual composite.
+    Redesign engines (paid Gemini image first, then Cloudflare):
+      1) Gemini Nano Banana Pro / Flash Image — real photo edit
+      2) Cloudflare Workers AI Lightning — backup
+    Returns the real model image (no manual paint / blend overlay).
     """
     from app.services.material_regions import RegionMaterialAssignment
 
@@ -44,44 +45,58 @@ async def generate_redesign(
     region_assignments: list[RegionMaterialAssignment] = [
         a for a in (assignments or []) if isinstance(a, RegionMaterialAssignment)
     ]
+    has_gemini = bool(
+        (settings.gemini_api_key or "").strip()
+        and getattr(settings, "enable_gemini_redesign", True)
+    )
     has_cf = bool(
         settings.enable_cloudflare_redesign
         and (settings.cloudflare_account_id or "").strip()
         and (settings.cloudflare_api_token or "").strip()
     )
     logger.info(
-        "REDESIGN begin engine=cloudflare_raw hq=%s regions=%s cf_ready=%s",
+        "REDESIGN begin gemini=%s cf=%s hq=%s regions=%s",
+        has_gemini,
+        has_cf,
         hq_mode,
         len(region_assignments),
-        has_cf,
     )
-
-    if not has_cf:
-        notes.append(
-            "cloudflare: set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
-            "(Workers AI) and ENABLE_CLOUDFLARE_REDESIGN=true"
-        )
-        raise RedesignUnavailableError(notes)
 
     if region_assignments:
         notes.append(f"materials_in_prompt: {len(region_assignments)} regions")
 
-    logger.info("REDESIGN try cloudflare hq=%s (raw AI output)", hq_mode)
-    path, cf_err = await _cloudflare_generate(source_path, prompt, hq_mode=hq_mode)
-    if path:
-        # Only normalize size for the UI — do not blend or paint over the AI image
-        path = _resize_ai_to_source(source_path, path)
-        notes.append("raw_cloudflare_output")
-        logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-        return path, "cloudflare", notes
+    if has_gemini:
+        logger.info("REDESIGN try gemini image hq=%s", hq_mode)
+        path, model_used, gem_err = await _gemini_image_edit(source_path, prompt, hq_mode=hq_mode)
+        if path:
+            path = _resize_ai_to_source(source_path, path)
+            notes.append(f"gemini_model={model_used}")
+            notes.append("raw_gemini_output")
+            logger.info("REDESIGN ok engine=gemini_image model=%s", model_used)
+            return path, "gemini_image", notes
+        notes.append(f"gemini: {gem_err or 'failed'}")
 
-    notes.append(f"cloudflare: {cf_err or 'request failed'}")
-    logger.error("REDESIGN cloudflare failed notes=%s", notes)
+    if has_cf:
+        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+        path, cf_err = await _cloudflare_generate(source_path, prompt, hq_mode=hq_mode)
+        if path:
+            path = _resize_ai_to_source(source_path, path)
+            notes.append("raw_cloudflare_output")
+            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
+            return path, "cloudflare", notes
+        notes.append(f"cloudflare: {cf_err or 'request failed'}")
+
+    if not has_gemini and not has_cf:
+        notes.append(
+            "set GEMINI_API_KEY + ENABLE_GEMINI_REDESIGN=true "
+            "(and/or CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)"
+        )
+    logger.error("REDESIGN failed notes=%s", notes)
     raise RedesignUnavailableError(notes)
 
 
 class RedesignUnavailableError(Exception):
-    """Cloudflare redesign failed."""
+    """Redesign engines failed."""
 
     def __init__(self, notes: list[str]):
         self.notes = notes
@@ -413,18 +428,48 @@ async def _cloudflare_generate(
         return None, str(exc)[:180]
 
 
-async def _gemini_hq(source_path: Path, prompt: str) -> str | None:
+async def _gemini_image_edit(
+    source_path: Path, prompt: str, hq_mode: bool = False
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Paid Gemini Nano Banana image edit.
+    Returns (rel_path, model_id, error).
+    """
     from fastapi.concurrency import run_in_threadpool
 
-    def _run() -> str | None:
-        settings = get_settings()
+    settings = get_settings()
+    key = (settings.gemini_api_key or "").strip()
+    if not key:
+        return None, None, "GEMINI_API_KEY empty"
+
+    # Prefer Pro for HQ; Flash Image for speed; always keep legacy as last resort
+    models: list[str] = []
+    primary = (settings.gemini_image_model or "gemini-3-pro-image").strip()
+    fallback = (getattr(settings, "gemini_image_fallback_model", None) or "gemini-3.1-flash-image").strip()
+    legacy = (getattr(settings, "gemini_image_legacy_model", None) or "gemini-2.5-flash-image").strip()
+    if hq_mode or getattr(settings, "enable_gemini_hq", True):
+        for m in (primary, fallback, legacy):
+            if m and m not in models:
+                models.append(m)
+    else:
+        for m in (fallback, primary, legacy):
+            if m and m not in models:
+                models.append(m)
+
+    edit_prompt = (
+        f"{prompt}\n\n"
+        "Edit THIS uploaded photograph only. Keep the same house, camera, and layout. "
+        "Change facade materials as specified. Photoreal. No watermark. No new building."
+    )
+
+    def _run_one(model_name: str) -> tuple[str | None, str | None]:
         try:
             import google.generativeai as genai
 
-            genai.configure(api_key=settings.gemini_api_key)
-            model = genai.GenerativeModel(settings.gemini_image_model)
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel(model_name)
             uploaded = genai.upload_file(str(source_path))
-            result = model.generate_content([uploaded, prompt])
+            result = model.generate_content([uploaded, edit_prompt])
             root = ensure_upload_dirs()
             name = f"{uuid.uuid4().hex}.png"
             dest = root / "redesigns" / name
@@ -433,14 +478,41 @@ async def _gemini_hq(source_path: Path, prompt: str) -> str | None:
                 for part in getattr(content, "parts", []) or []:
                     inline = getattr(part, "inline_data", None)
                     if inline and getattr(inline, "data", None):
-                        dest.write_bytes(inline.data)
-                        return f"redesigns/{name}"
-            return None
+                        data = inline.data
+                        if isinstance(data, str):
+                            dest.write_bytes(base64.b64decode(data))
+                        else:
+                            dest.write_bytes(data)
+                        return f"redesigns/{name}", None
+            # Some SDK versions expose .parts on response
+            for part in getattr(result, "parts", []) or []:
+                inline = getattr(part, "inline_data", None)
+                if inline and getattr(inline, "data", None):
+                    data = inline.data
+                    if isinstance(data, str):
+                        dest.write_bytes(base64.b64decode(data))
+                    else:
+                        dest.write_bytes(data)
+                    return f"redesigns/{name}", None
+            return None, "no image bytes in response"
         except Exception as exc:
-            logger.warning("REDESIGN gemini_hq exception: %s", exc)
-            return None
+            return None, str(exc)[:200]
 
-    return await run_in_threadpool(_run)
+    errors: list[str] = []
+    for model_name in models:
+        logger.info("REDESIGN gemini_image try model=%s", model_name)
+        path, err = await run_in_threadpool(_run_one, model_name)
+        if path:
+            return path, model_name, None
+        errors.append(f"{model_name}: {err or 'failed'}")
+        logger.warning("REDESIGN gemini_image miss %s", errors[-1])
+    return None, None, " | ".join(errors[:3]) if errors else "gemini image edit failed"
+
+
+async def _gemini_hq(source_path: Path, prompt: str) -> str | None:
+    """Backward-compatible wrapper."""
+    path, _model, _err = await _gemini_image_edit(source_path, prompt, hq_mode=True)
+    return path
 
 
 def _local_fallback_redesign(source_path: Path, prompt: str) -> str:

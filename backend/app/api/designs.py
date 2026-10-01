@@ -230,10 +230,10 @@ async def visualize(
         raise HTTPException(
             status_code=503,
             detail=(
-                "AI redesign unavailable (Cloudflare only). "
+                "AI redesign unavailable. "
                 + " | ".join(exc.notes)
-                + " Set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN for Workers AI "
-                "(https://developers.cloudflare.com/workers-ai/get-started/rest-api/)."
+                + " Set GEMINI_API_KEY (Nano Banana image models) and/or "
+                + "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN."
             ),
         ) from exc
     if scene_engine:

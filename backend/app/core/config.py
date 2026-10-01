@@ -35,11 +35,26 @@ class Settings(BaseSettings):
     admin_email: str = ""
     admin_password: str = ""
 
+    # --- Gemini (paid) — generation + segmentation ---
+    # GENERATION (image edit) — use ONLY image-capable Nano Banana models:
+    #   BEST quality:  gemini-3-pro-image          (Nano Banana Pro)
+    #   BEST balance:  gemini-3.1-flash-image       (Nano Banana 2)
+    #   Good fallback: gemini-2.5-flash-image       (Nano Banana)
+    # NOT for generation: gemini-*-flash/pro text models, Imagen (deprecated),
+    #   TTS/Live/Veo, gemini-2.0-* (shutdown).
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
-    gemini_image_model: str = "gemini-2.5-flash-image"
-    enable_gemini_hq: bool = False
-    # Slow (upload + Gemini round-trip); off by default for fast uploads
+    gemini_model: str = "gemini-3.8-flash"  # text/vision describe — not image output
+    gemini_image_model: str = "gemini-3-pro-image"
+    gemini_image_fallback_model: str = "gemini-3.1-flash-image"
+    gemini_image_legacy_model: str = "gemini-2.5-flash-image"
+    enable_gemini_redesign: bool = True
+    enable_gemini_hq: bool = True  # prefer Pro image model when HQ mode
+    # SEGMENTATION (structure boxes) — use vision reasoning models, NOT image-gen:
+    #   BEST: gemini-2.5-pro (structured boxes) or gemini-3.1-pro-preview
+    #   OK:   gemini-3.8-flash / gemini-2.5-flash (faster, less accurate)
+    # NOT for segmentation: *-image models, flash-lite, TTS/Live/Imagen
+    gemini_detect_model: str = "gemini-2.5-pro"
+    enable_gemini_detect: bool = True
     enable_gemini_quality_notes: bool = False
 
     cloudflare_account_id: str = ""
