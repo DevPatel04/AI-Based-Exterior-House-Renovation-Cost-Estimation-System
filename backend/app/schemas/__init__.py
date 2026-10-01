@@ -211,6 +211,7 @@ class DesignOut(BaseModel):
     name: str
     is_active: bool
     redesign_path: str | None
+    prompt_used: str | None = None
     hq_mode: bool
     created_at: datetime
 

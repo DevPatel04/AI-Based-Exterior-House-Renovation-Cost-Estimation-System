@@ -8,12 +8,12 @@
 - Database: **PostgreSQL**
 - File storage: **Local disk**
 - Vision / analysis: **Google Gemini**
-- Redesign images: **Cloudflare Workers AI** (optional HQ: Gemini image API)
+- Redesign images: **Cloudflare Workers AI** + optional **fal.ai ControlNet** (structure-preserving) + optional Gemini HQ
 - Backend: **FastAPI (Python)**
 - Frontend: **Next.js + TypeScript + Tailwind**
 - PDF reports: **ReportLab**
 - Region editing UI: **Konva / Fabric.js**
-- Optional quality helper: **OpenCV**
+- Optional quality helper: **OpenCV** (also used for ControlNet Canny maps)
 
 ---
 
