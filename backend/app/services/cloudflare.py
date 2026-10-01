@@ -157,11 +157,7 @@ async def _cloudflare_img2img(
         return None, "CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN empty"
 
     models: list[str] = []
-    for m in (
-        configured,
-        "@cf/bytedance/stable-diffusion-xl-lightning",
-        "@cf/lykon/dreamshaper-8-lcm",
-    ):
+    for m in (configured,):
         # Skip Runway models — this account gets 403 "not allowed to access"
         if not m or "runwayml" in m.lower():
             continue
@@ -178,18 +174,13 @@ async def _cloudflare_img2img(
         w, h = img.size
         img = img.resize((max(512, (w // 8) * 8), max(512, (h // 8) * 8)), Image.Resampling.LANCZOS)
 
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_b64 = base64.b64encode(buf.getvalue()).decode()
-
-        num_steps = 8 if hq_mode else 6
-        strength = 0.5 if hq_mode else 0.4
+        num_steps = 6 if hq_mode else 4
         negative = (
             "blurry, distorted windows, warped roof, extra floors, people, text, "
             "watermark, cartoon, low quality, different building layout"
         )
 
-        # txt2img first (reliable on lightning), then optional image_b64 img2img
+        # One payload only (txt2img) — cascading fallbacks made CF path very slow
         payloads = [
             {
                 "prompt": prompt,
@@ -198,14 +189,6 @@ async def _cloudflare_img2img(
                 "guidance": 7.5,
                 "width": img.size[0],
                 "height": img.size[1],
-            },
-            {
-                "prompt": prompt,
-                "negative_prompt": negative,
-                "image_b64": image_b64,
-                "strength": strength,
-                "num_steps": num_steps,
-                "guidance": 7.5,
             },
         ]
 

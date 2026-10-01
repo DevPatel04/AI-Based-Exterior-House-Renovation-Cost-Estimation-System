@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_permission
 from app.api.projects import _get_project_for_edit, _get_project_or_404
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import ProjectImage, User
 from app.schemas import ImageOut
-from app.services.gemini import gemini_quality_notes
 from app.services.quality import check_image_quality
 from app.services.storage import absolute_path, save_image_upload
 
@@ -27,9 +27,13 @@ async def upload_image(
     # Any image format Pillow/OpenCV can handle; no MIME-type force
     rel, dest = await save_image_upload(file, "originals")
     ok, message, w, h = await run_in_threadpool(check_image_quality, dest)
-    gemini_note = await gemini_quality_notes(dest)
-    if gemini_note:
-        message = f"{message} {gemini_note}"
+    settings = get_settings()
+    if settings.enable_gemini_quality_notes:
+        from app.services.gemini import gemini_quality_notes
+
+        gemini_note = await gemini_quality_notes(dest)
+        if gemini_note:
+            message = f"{message} {gemini_note}"
 
     existing = db.query(ProjectImage).filter(ProjectImage.project_id == project.id).count()
     make_primary = existing == 0 or set_primary.lower() in {"1", "true", "yes", "on"}

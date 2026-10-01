@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     gemini_image_model: str = "gemini-2.5-flash-image"
     enable_gemini_hq: bool = False
+    # Slow (upload + Gemini round-trip); off by default for fast uploads
+    enable_gemini_quality_notes: bool = False
 
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""
@@ -53,18 +55,18 @@ class Settings(BaseSettings):
     enable_fal_controlnet: bool = True
     fal_controlnet_model: str = "fal-ai/fast-sdxl-controlnet-canny"
     fal_controlnet_scale: float = 0.65
-    fal_controlnet_steps: int = 28
+    fal_controlnet_steps: int = 20
 
     # Replicate redesign (img2img preferred for accuracy; ControlNet as backup)
     replicate_api_token: str = ""
     enable_replicate_img2img: bool = True
     replicate_img2img_model: str = "lucataco/sdxl"
     replicate_img2img_strength: float = 0.42  # lower = closer to original photo
-    replicate_img2img_steps: int = 28
+    replicate_img2img_steps: int = 20
     enable_replicate_controlnet: bool = True
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85
-    replicate_controlnet_steps: int = 30
+    replicate_controlnet_steps: int = 20
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
     # Green-overlay PIL preview when all AI engines fail (off by default — prefer a clear error)
     allow_local_redesign_fallback: bool = False
@@ -73,8 +75,11 @@ class Settings(BaseSettings):
     hf_token: str = ""
     enable_segformer: bool = True
     segformer_model: str = "nvidia/segformer-b0-finetuned-ade-512-512"
+    # Depth refine is slow; still used when facade size is unknown
     enable_depth_scale: bool = True
     depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
+    # Max long edge stored for uploads (smaller = faster detect/redesign)
+    upload_max_edge: int = 1600
     replicate_seg_model: str = "schananas/grounded_sam"
 
     default_door_width_ft: float = 3.0

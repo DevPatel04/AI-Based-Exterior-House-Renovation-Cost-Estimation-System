@@ -36,7 +36,9 @@ async def run_area_estimation(
     )
     refs = refs or ReferenceMeasurements()
     depth_info = None
-    if image is not None:
+    # Skip slow HF/Replicate depth when the user already provided facade size
+    has_refs = bool(refs.known_width_ft and refs.known_height_ft)
+    if image is not None and not has_refs:
         from app.services.depth_scale import refine_facade_scale
 
         depth_info = await refine_facade_scale(
@@ -45,6 +47,16 @@ async def run_area_estimation(
             image_height=image.height_px,
             known_width_ft=refs.known_width_ft,
             known_height_ft=refs.known_height_ft,
+        )
+    elif image is not None and has_refs:
+        from app.services.depth_scale import DepthScaleInfo
+
+        depth_info = DepthScaleInfo(
+            facade_width_ft=float(refs.known_width_ft),
+            facade_height_ft=float(refs.known_height_ft),
+            depth_map=None,
+            method="user_reference",
+            confidence=0.95,
         )
     return estimate_areas(
         db,

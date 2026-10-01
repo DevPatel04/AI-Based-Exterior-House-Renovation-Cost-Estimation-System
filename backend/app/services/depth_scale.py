@@ -283,7 +283,14 @@ def _refine_sync(
 ) -> DepthScaleInfo:
     settings = get_settings()
     depth = None
-    if settings.enable_depth_scale and image_path is not None and image_path.exists():
+    # User tape measure already set — skip expensive depth models
+    need_depth = not (known_width_ft and known_height_ft)
+    if (
+        need_depth
+        and settings.enable_depth_scale
+        and image_path is not None
+        and image_path.exists()
+    ):
         depth = _hf_depth_sync(image_path)
         if depth is None:
             depth = _replicate_depth_sync(image_path)

@@ -78,7 +78,7 @@ async def generate_replicate_controlnet_redesign(
         "low quality, fake textures"
     )
     condition_scale = float(settings.replicate_controlnet_scale or 0.85)
-    steps = int(settings.replicate_controlnet_steps or 30)
+    steps = int(settings.replicate_controlnet_steps or 20)
     payload = {
         "input": {
             "prompt": prompt,
@@ -93,18 +93,19 @@ async def generate_replicate_controlnet_redesign(
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=60",
+        "Prefer": "wait=55",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             logger.info(
                 "REDESIGN replicate_call start model=%s condition_scale=%s steps=%s",
                 model,
                 condition_scale,
                 steps,
             )
-            attempts = [("canny", control_uri), ("photo", source_uri)]
+            # Canny only — second photo attempt nearly doubles latency on failure paths
+            attempts = [("canny", control_uri)]
             last_err: str | None = None
             for attempt_name, image_uri in attempts:
                 payload["input"]["image"] = image_uri

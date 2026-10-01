@@ -578,11 +578,11 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
 
     try:
         pil = Image.open(image_path).convert("RGB")
-        pil.thumbnail((1024, 1024))
+        pil.thumbnail((768, 768))
         width, height = pil.size
         rgb = np.array(pil)
         buf = io.BytesIO()
-        pil.save(buf, format="JPEG", quality=92)
+        pil.save(buf, format="JPEG", quality=85)
         body = buf.getvalue()
     except Exception as exc:
         raise StructureDetectError(f"Could not read project image: {exc}") from exc
@@ -599,7 +599,7 @@ def _detect_segformer_sync(image_path: Path) -> list[dict]:
             models.append(m)
 
     collected: list[list[dict]] = []
-    with httpx.Client(timeout=180.0) as client:
+    with httpx.Client(timeout=90.0) as client:
         for model in models:
             data = _call_hf_image_segmentation(client, model, body, token)
             if data is None:

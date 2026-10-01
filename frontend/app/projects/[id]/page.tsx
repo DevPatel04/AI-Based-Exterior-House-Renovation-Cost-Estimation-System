@@ -73,6 +73,7 @@ export default function ProjectWorkspacePage() {
 
   const stepperRef = useRef<HTMLElement>(null);
   const firstStepRender = useRef(true);
+  const autoEstimateStarted = useRef(false);
 
   // On step change: keep the active step visible in the (mobile) horizontal stepper and bring the
   // top of the new step into view if the user continued from further down the page.
@@ -305,6 +306,9 @@ export default function ProjectWorkspacePage() {
       await refresh();
       setRedesignVersion((v) => v + 1);
       toast.success(hq ? "HQ redesign generated." : "Redesign generated.");
+      // Move to estimate — useEffect auto-starts Calculate the first time
+      autoEstimateStarted.current = false;
+      setStep(4);
     } catch (err: any) {
       toast.error(err.message || "Redesign failed");
     } finally {
@@ -364,15 +368,28 @@ export default function ProjectWorkspacePage() {
       const c = await api.calculate(projectId);
       setCosts(c);
       setQuantities(await api.listQuantities(projectId));
-      await refresh();
       toast.success("Areas, quantities, and costs calculated.");
     } catch (err: any) {
       toast.error(err.message);
+      autoEstimateStarted.current = false;
     } finally {
       setBusy(false);
       setProgress("");
     }
   }
+
+  // Auto-start calculate the first time the user reaches the estimate step
+  useEffect(() => {
+    if (step !== 4 || autoEstimateStarted.current || busy || loadError) return;
+    if (!regions.length) return;
+    if (costs?.lines?.length) {
+      autoEstimateStarted.current = true;
+      return;
+    }
+    autoEstimateStarted.current = true;
+    void runEstimate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, regions.length, costs?.lines?.length]);
 
   async function overrideArea(a: any, value: number) {
     setBusy(true);

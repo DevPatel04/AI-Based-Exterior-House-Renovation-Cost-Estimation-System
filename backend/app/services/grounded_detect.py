@@ -38,11 +38,11 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
         )
 
     img = Image.open(image_path).convert("RGB")
-    img.thumbnail((1024, 1024))
+    img.thumbnail((768, 768))
     width, height = img.size
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    img.save(buf, format="JPEG", quality=85)
+    data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
     # Combined prompt (Grounded-SAM style)
     prompt = " . ".join(p[0] for p in _PROMPT_MAP)
@@ -50,7 +50,7 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=60",
+        "Prefer": "wait=45",
     }
     payload = {
         "input": {
@@ -62,7 +62,7 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
         }
     }
 
-    with httpx.Client(timeout=180.0) as client:
+    with httpx.Client(timeout=120.0) as client:
         resp = client.post(
             f"https://api.replicate.com/v1/models/{model}/predictions",
             headers=headers,
@@ -88,8 +88,8 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
         if not output and get_url:
             import time
 
-            for _ in range(60):
-                time.sleep(2)
+            for _ in range(40):
+                time.sleep(1.5)
                 st = client.get(get_url, headers={"Authorization": f"Bearer {token}"})
                 body = st.json()
                 status = (body.get("status") or "").lower()

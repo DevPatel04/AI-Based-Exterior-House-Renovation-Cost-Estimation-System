@@ -17,6 +17,40 @@ function resolveApiUrl(): string {
 
 const API_URL = resolveApiUrl();
 
+/** Downscale large phone photos before upload so the API responds faster. */
+async function compressImageForUpload(file: File, maxEdge = 1600, quality = 0.85): Promise<File> {
+  if (!file.type.startsWith("image/") || file.type === "image/gif") return file;
+  if (file.size < 400_000) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    if (scale >= 1 && file.size < 1_500_000) {
+      bitmap.close();
+      return file;
+    }
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", quality)
+    );
+    if (!blob || blob.size >= file.size) return file;
+    const name = file.name.replace(/\.\w+$/, "") + ".jpg";
+    return new File([blob], name, { type: "image/jpeg", lastModified: Date.now() });
+  } catch {
+    return file;
+  }
+}
+
 export type RoleName =
   | "homeowner"
   | "contractor"
@@ -138,9 +172,10 @@ export const api = {
   shareProject: (id: number, body: object) =>
     request(`/api/projects/${id}/members`, { method: "POST", body: JSON.stringify(body) }),
   listMembers: (id: number) => request<any[]>(`/api/projects/${id}/members`),
-  uploadImage: (projectId: number, file: File, setPrimary = false) => {
+  uploadImage: async (projectId: number, file: File, setPrimary = false) => {
     const fd = new FormData();
-    fd.append("file", file);
+    const compressed = await compressImageForUpload(file);
+    fd.append("file", compressed);
     fd.append("set_primary", setPrimary ? "true" : "false");
     return request<any>(`/api/projects/${projectId}/images`, { method: "POST", body: fd });
   },

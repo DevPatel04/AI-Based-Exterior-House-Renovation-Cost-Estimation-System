@@ -78,7 +78,9 @@ async def generate_replicate_img2img_redesign(
     strength = float(settings.replicate_img2img_strength or 0.42)
     if hq_mode:
         strength = min(0.58, strength + 0.08)
-    steps = int(settings.replicate_img2img_steps or (35 if hq_mode else 28))
+    steps = int(settings.replicate_img2img_steps or 20)
+    if hq_mode:
+        steps = min(35, steps + 8)
 
     negative = (
         "blurry, distorted geometry, warped windows, melted glass, extra floors, "
@@ -105,11 +107,11 @@ async def generate_replicate_img2img_redesign(
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "Prefer": "wait=60",
+        "Prefer": "wait=55",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             logger.info(
                 "REDESIGN replicate_img2img start model=%s strength=%s steps=%s size=%sx%s",
                 model,
@@ -147,7 +149,7 @@ async def generate_replicate_img2img_redesign(
                 import asyncio
 
                 logger.info("REDESIGN replicate_img2img polling id=%s status=%s", pred_id, status)
-                for _ in range(60):
+                for _ in range(40):
                     st = await client.get(get_url, headers={"Authorization": f"Bearer {token}"})
                     if st.status_code >= 400:
                         return None, f"poll HTTP {st.status_code}"
@@ -158,7 +160,7 @@ async def generate_replicate_img2img_redesign(
                         break
                     if status in {"failed", "canceled"}:
                         return None, f"prediction {status}: {(body.get('error') or '')[:160]}"
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(1.5)
 
             if not output:
                 return None, "no output from Replicate img2img"
