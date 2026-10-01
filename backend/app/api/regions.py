@@ -150,6 +150,23 @@ def update_region(
     return region
 
 
+@router.delete("/all")
+def clear_regions(
+    project_id: int,
+    user: User = Depends(require_permission("regions:edit")),
+    db: Session = Depends(get_db),
+):
+    """Remove all structure regions for this project (design material links cascade)."""
+    project = _get_project_for_edit(db, project_id, user)
+    deleted = (
+        db.query(StructureRegion)
+        .filter(StructureRegion.project_id == project.id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"ok": True, "deleted": int(deleted or 0)}
+
+
 @router.delete("/{region_id}")
 def delete_region(
     project_id: int,

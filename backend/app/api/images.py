@@ -84,6 +84,46 @@ def list_images(project_id: int, user: User = Depends(get_current_user), db: Ses
     return db.query(ProjectImage).filter(ProjectImage.project_id == project.id).order_by(ProjectImage.id).all()
 
 
+@router.delete("/{image_id}")
+def delete_image(
+    project_id: int,
+    image_id: int,
+    user: User = Depends(require_permission("project:edit")),
+    db: Session = Depends(get_db),
+):
+    project = _get_project_for_edit(db, project_id, user)
+    image = (
+        db.query(ProjectImage)
+        .filter(ProjectImage.id == image_id, ProjectImage.project_id == project.id)
+        .first()
+    )
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    was_primary = bool(image.is_primary)
+    path = absolute_path(image.file_path)
+    db.delete(image)
+    db.flush()
+
+    if was_primary:
+        nxt = (
+            db.query(ProjectImage)
+            .filter(ProjectImage.project_id == project.id)
+            .order_by(ProjectImage.id)
+            .first()
+        )
+        if nxt:
+            nxt.is_primary = True
+
+    db.commit()
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+    return {"ok": True}
+
+
 @router.get("/{image_id}/file")
 def get_image_file(
     project_id: int,

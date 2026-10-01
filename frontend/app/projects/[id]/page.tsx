@@ -190,6 +190,64 @@ export default function ProjectWorkspacePage() {
     }
   }
 
+  async function deleteImage(imageId: number) {
+    const ok = window.confirm("Delete this photo? Related work stays, but you’ll need another primary image.");
+    if (!ok) return;
+    setBusy(true);
+    setProgress("Deleting photo…");
+    try {
+      await api.deleteImage(projectId, imageId);
+      await refresh();
+      toast.success("Photo deleted.");
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
+  async function clearAllRegions() {
+    if (!regions.length) return;
+    const ok = window.confirm(
+      `Clear all ${regions.length} regions? Material assignments on those regions will be removed.`
+    );
+    if (!ok) return;
+    setBusy(true);
+    setProgress("Clearing regions…");
+    try {
+      const res = await api.clearRegions(projectId);
+      setRegions([]);
+      setAssignments({});
+      setSuggestionReasons({});
+      setDetectEngine("");
+      toast.success(`Cleared ${res.deleted ?? 0} regions.`);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
+  async function deleteProject() {
+    const ok = window.confirm(
+      `Delete project “${project?.title || "this project"}”? It will be archived and removed from your list.`
+    );
+    if (!ok) return;
+    setBusy(true);
+    setProgress("Deleting project…");
+    try {
+      await api.archiveProject(projectId);
+      toast.success("Project deleted.");
+      window.location.href = "/dashboard";
+    } catch (err: any) {
+      toast.error(err.message);
+      setBusy(false);
+      setProgress("");
+    }
+  }
+
   // Long-running actions below only run from their own step, so they don't call setStep on
   // completion — that would pull the user back if they navigated elsewhere meanwhile.
   async function detect(opts?: { auto?: boolean }) {
@@ -637,9 +695,12 @@ export default function ProjectWorkspacePage() {
           </div>
           {project.description && <p className="mt-1.5 max-w-3xl text-sm text-slate-600 sm:text-base">{project.description}</p>}
         </div>
-        <div className="flex gap-2">
-          <button className="btn-outline" onClick={openShare}>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-outline" onClick={openShare} disabled={busy}>
             <Icon name="share" /> Share
+          </button>
+          <button className="btn-danger" onClick={deleteProject} disabled={busy} title="Archive / delete this project">
+            <Icon name="trash" /> Delete project
           </button>
         </div>
       </div>
@@ -784,6 +845,14 @@ export default function ProjectWorkspacePage() {
                           <Icon name="star" className="h-3.5 w-3.5" /> Set as primary
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="btn-danger btn-sm"
+                        onClick={() => deleteImage(img.id)}
+                        disabled={busy}
+                      >
+                        <Icon name="trash" className="h-3.5 w-3.5" /> Delete
+                      </button>
                     </div>
                   </li>
                 ))}
@@ -806,10 +875,22 @@ export default function ProjectWorkspacePage() {
           title="Structure regions"
           description="Let AI outline walls, windows, balconies and more — then fine-tune any shape or draw your own."
           actions={
-            <button className="btn-primary" onClick={() => detect()} disabled={busy || !primary}>
-              {busy && progress.startsWith("Detecting") ? <Spinner /> : <Icon name="wand" />}
-              {regions.length ? "Re-detect with AI" : "Detect with AI"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              {regions.length > 0 && (
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={clearAllRegions}
+                  disabled={busy || !primary}
+                >
+                  <Icon name="trash" /> Clear regions
+                </button>
+              )}
+              <button className="btn-primary" onClick={() => detect()} disabled={busy || !primary}>
+                {busy && progress.startsWith("Detecting") ? <Spinner /> : <Icon name="wand" />}
+                {regions.length ? "Re-detect with AI" : "Detect with AI"}
+              </button>
+            </div>
           }
         >
           {primary ? (
@@ -821,7 +902,13 @@ export default function ProjectWorkspacePage() {
                     : "Detection starts automatically on this step. You can also re-run AI or draw regions manually."}
                 </Alert>
               )}
-              <RegionCanvas projectId={projectId} imageId={primary.id} regions={regions} onChange={setRegions} />
+              <RegionCanvas
+                projectId={projectId}
+                imageId={primary.id}
+                regions={regions}
+                onChange={setRegions}
+                onClearAll={clearAllRegions}
+              />
               {detectEngine && regions.length > 0 && (
                 <p className="mt-2 text-xs text-slate-500">
                   Last detect engine:{" "}

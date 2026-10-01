@@ -28,11 +28,13 @@ export default function RegionCanvas({
   imageId,
   regions,
   onChange,
+  onClearAll,
 }: {
   projectId: number;
   imageId: number;
   regions: any[];
   onChange: (regions: any[]) => void;
+  onClearAll?: () => void;
 }) {
   const toast = useToast();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -205,12 +207,17 @@ export default function RegionCanvas({
               ))}
             </select>
             <button type="button" className="btn-ghost btn-sm" onClick={() => setDraft([])} disabled={!draft.length}>
-              Clear
+              Clear draft
             </button>
             <button type="button" className="btn-primary btn-sm" disabled={draft.length < 3 || busy} onClick={finishDraw}>
               {busy ? <Spinner /> : <Icon name="check" />} Finish ({draft.length} pts)
             </button>
           </div>
+        )}
+        {mode === "select" && regions.length > 0 && onClearAll && (
+          <button type="button" className="btn-outline btn-sm" onClick={onClearAll} disabled={busy}>
+            <Icon name="trash" className="h-3.5 w-3.5" /> Clear all
+          </button>
         )}
         {mode === "select" && busy && (
           <span className="flex items-center gap-2 px-2 text-xs text-slate-500">

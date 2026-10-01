@@ -30,6 +30,7 @@ export default function DashboardPage() {
   const [creating, setCreating] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [query, setQuery] = useState("");
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const load = async () => {
     setError("");
@@ -57,6 +58,20 @@ export default function DashboardPage() {
     } catch (err: any) {
       setCreateError(err.message);
       setCreating(false);
+    }
+  }
+
+  async function deleteProject(id: number, title: string) {
+    const ok = window.confirm(`Delete project “${title}”? It will be removed from your list.`);
+    if (!ok) return;
+    setDeletingId(id);
+    try {
+      await api.archiveProject(id);
+      setProjects((prev) => (prev || []).filter((p) => p.id !== id));
+    } catch (err: any) {
+      setError(err.message || "Could not delete project");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -146,7 +161,7 @@ export default function DashboardPage() {
       ) : (
         <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((p) => (
-            <li key={p.id}>
+            <li key={p.id} className="relative">
               <Link
                 href={`/projects/${p.id}`}
                 className="group card-panel flex h-full flex-col p-5 transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-pop"
@@ -170,6 +185,19 @@ export default function DashboardPage() {
                   </span>
                 </div>
               </Link>
+              <button
+                type="button"
+                className="btn-danger btn-sm absolute right-3 top-14"
+                title="Delete project"
+                disabled={deletingId === p.id}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void deleteProject(p.id, p.title);
+                }}
+              >
+                {deletingId === p.id ? <Spinner className="h-3.5 w-3.5" /> : <Icon name="trash" className="h-3.5 w-3.5" />}
+              </button>
             </li>
           ))}
         </ul>

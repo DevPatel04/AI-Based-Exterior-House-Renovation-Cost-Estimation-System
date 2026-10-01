@@ -181,6 +181,8 @@ export const api = {
   },
   setPrimaryImage: (projectId: number, imageId: number) =>
     request(`/api/projects/${projectId}/images/${imageId}/set-primary`, { method: "POST" }),
+  deleteImage: (projectId: number, imageId: number) =>
+    request(`/api/projects/${projectId}/images/${imageId}`, { method: "DELETE" }),
   listImages: (projectId: number) => request<any[]>(`/api/projects/${projectId}/images`),
   imageUrl: (projectId: number, imageId: number) =>
     `${API_URL}/api/projects/${projectId}/images/${imageId}/file`,
@@ -190,6 +192,10 @@ export const api = {
       { method: "POST" }
     ),
   listRegions: (projectId: number) => request<any[]>(`/api/projects/${projectId}/regions`),
+  clearRegions: (projectId: number) =>
+    request<{ ok: boolean; deleted: number }>(`/api/projects/${projectId}/regions/all`, {
+      method: "DELETE",
+    }),
   createRegion: (projectId: number, body: object) =>
     request(`/api/projects/${projectId}/regions`, {
       method: "POST",
