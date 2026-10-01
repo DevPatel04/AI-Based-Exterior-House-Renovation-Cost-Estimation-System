@@ -222,8 +222,8 @@ async def visualize(
             detail=(
                 "AI redesign unavailable. "
                 + " | ".join(exc.notes)
-                + " Set a valid REPLICATE_API_TOKEN for google/nano-banana-2, "
-                + "or ALLOW_LOCAL_REDESIGN_FALLBACK=true for a real-photo material preview."
+                + " Set ENABLE_POLLINATIONS_NANOBANANA=true (free) and/or "
+                + "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN with ENABLE_CLOUDFLARE_REDESIGN=true."
             ),
         ) from exc
     design.redesign_path = rel

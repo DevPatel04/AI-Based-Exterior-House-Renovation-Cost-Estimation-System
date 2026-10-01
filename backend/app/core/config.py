@@ -57,22 +57,26 @@ class Settings(BaseSettings):
     fal_controlnet_scale: float = 0.65
     fal_controlnet_steps: int = 20
 
-    # Replicate redesign — Nano Banana 2 (Google) first, then SDXL img2img / ControlNet
+    # Free redesign: Pollinations Nano Banana (no key) + Cloudflare SDXL Lightning
+    enable_pollinations_nanobanana: bool = True
+    pollinations_nanobanana_model: str = "nanobanana"
+    pollinations_api_key: str = ""  # optional — anonymous works when edits allow it
+    enable_cloudflare_redesign: bool = True
+
+    # Optional Replicate (paid) — off by default; Pollinations/Cloudflare are primary
     replicate_api_token: str = ""
-    enable_nano_banana: bool = True
+    enable_nano_banana: bool = False
     nano_banana_model: str = "google/nano-banana-2"
     nano_banana_resolution: str = "1K"  # 1K | 2K | 4K (HQ uses 2K)
-    enable_replicate_img2img: bool = True
+    enable_replicate_img2img: bool = False
     replicate_img2img_model: str = "lucataco/sdxl"
-    replicate_img2img_strength: float = 0.45  # visible material change while keeping photo structure
+    replicate_img2img_strength: float = 0.45
     replicate_img2img_steps: int = 28
-    enable_replicate_controlnet: bool = True
+    enable_replicate_controlnet: bool = False
     replicate_controlnet_model: str = "lucataco/sdxl-controlnet"
     replicate_controlnet_scale: float = 0.85
     replicate_controlnet_steps: int = 24
     replicate_depth_model: str = "chenxwh/depth-anything-v2"
-    # Cloudflare lightning invents cartoon houses — off by default
-    enable_cloudflare_redesign: bool = False
     # Real-photo material preview when AI engines fail
     allow_local_redesign_fallback: bool = True
 
@@ -85,6 +89,12 @@ class Settings(BaseSettings):
     depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf"
     # Max long edge stored for uploads (smaller = faster detect/redesign)
     upload_max_edge: int = 1600
+    # SegFormer / Grounded detect long edge (higher = better small windows)
+    detect_max_edge: int = 1280
+    # Call Grounded-SAM when openings below this count
+    grounded_min_openings: int = 3
+    grounded_box_threshold: float = 0.35
+    grounded_text_threshold: float = 0.25
     replicate_seg_model: str = "schananas/grounded_sam"
 
     default_door_width_ft: float = 3.0

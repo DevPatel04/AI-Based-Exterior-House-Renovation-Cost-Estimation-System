@@ -71,15 +71,37 @@ async def detect_structure_regions(image_path: Path) -> list[dict]:
         logger.exception("SegFormer detect crashed: %s", exc)
 
     non_wall = sum(1 for r in regions if r.get("region_type") != RegionType.main_wall.value)
+    windows = sum(1 for r in regions if r.get("region_type") == RegionType.window.value)
     settings = get_settings()
-    need_parts = non_wall < 2
+    min_openings = int(getattr(settings, "grounded_min_openings", 3) or 3)
+    # Run Grounded when openings are scarce (not only when almost wall-only)
+    need_parts = non_wall < min_openings or windows < 2
     if need_parts and (settings.replicate_api_token or "").strip():
         try:
             from app.services.grounded_detect import detect_grounded_regions
-            from app.services.segformer import _merge_region_lists
+            from app.services.segformer import _merge_region_lists, enrich_with_opencv_parts
 
+            logger.info(
+                "DETECT trying Grounded-SAM (non_wall=%s windows=%s min=%s)",
+                non_wall,
+                windows,
+                min_openings,
+            )
             grounded = await detect_grounded_regions(image_path)
             regions = _merge_region_lists(regions, grounded)
+            # Re-enrich openings after Grounded merge
+            try:
+                from fastapi.concurrency import run_in_threadpool
+                from PIL import Image
+                import numpy as np
+
+                def _re_enrich():
+                    rgb = np.array(Image.open(image_path).convert("RGB"))
+                    return enrich_with_opencv_parts(rgb, regions)
+
+                regions = await run_in_threadpool(_re_enrich)
+            except Exception as enrich_exc:
+                logger.warning("DETECT post-Grounded OpenCV enrich skipped: %s", enrich_exc)
         except StructureDetectError as exc:
             logger.error("Grounded-SAM detect failed: %s", exc)
             if not regions:

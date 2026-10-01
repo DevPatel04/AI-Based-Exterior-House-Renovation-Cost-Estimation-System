@@ -35,7 +35,11 @@ async def generate_redesign(
     """
     Returns (relative_path, engine_used, failure_notes).
 
-    Applies user-selected materials onto each region polygon first, then AI.
+    Free-first order:
+      1) Pollinations nanobanana (reference photo, no key)
+      2) Cloudflare SDXL Lightning (blended onto photo / material guide)
+      3) Optional Replicate engines
+      4) Region material map / photo edit fallback
     """
     from app.services.material_regions import (
         RegionMaterialAssignment,
@@ -51,11 +55,16 @@ async def generate_redesign(
         a for a in (assignments or []) if isinstance(a, RegionMaterialAssignment)
     ]
     logger.info(
-        "REDESIGN begin hq=%s regions=%s replicate=%s nano=%s",
+        "REDESIGN begin hq=%s regions=%s pollinations=%s cloudflare=%s replicate=%s",
         hq_mode,
         len(region_assignments),
+        bool(settings.enable_pollinations_nanobanana),
+        bool(
+            settings.enable_cloudflare_redesign
+            and settings.cloudflare_account_id
+            and settings.cloudflare_api_token
+        ),
         has_replicate,
-        bool(has_replicate and settings.enable_nano_banana),
     )
 
     material_guide_rel: str | None = None
@@ -84,10 +93,54 @@ async def generate_redesign(
             return mask_ai_to_regions(source_path, path, region_assignments, ai_weight=weight)
         return path
 
+    # 1) Pollinations Nano Banana — free, reference-image edit
+    if settings.enable_pollinations_nanobanana:
+        from app.services.pollinations_nanobanana import generate_pollinations_nanobanana_redesign
+
+        logger.info("REDESIGN try pollinations_nanobanana")
+        path, err = await generate_pollinations_nanobanana_redesign(
+            source_path,
+            prompt,
+            hq_mode=hq_mode,
+            guide_path=material_guide_path,
+        )
+        if path:
+            path = _finalize_ai(path, 0.8)
+            logger.info("REDESIGN ok engine=pollinations_nanobanana path=%s", path)
+            return path, "pollinations_nanobanana", notes
+        notes.append(f"pollinations_nanobanana: {err or 'failed'}")
+        logger.warning("REDESIGN fail pollinations_nanobanana err=%s", err)
+    else:
+        notes.append("pollinations_nanobanana: skipped (ENABLE_POLLINATIONS_NANOBANANA=false)")
+
+    # 2) Cloudflare SDXL Lightning — free neurons; always blend onto real photo
+    if (
+        settings.enable_cloudflare_redesign
+        and settings.cloudflare_account_id
+        and settings.cloudflare_api_token
+    ):
+        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
+        cf_src = material_guide_path if material_guide_path else source_path
+        path, cf_err = await _cloudflare_img2img(cf_src, prompt, hq_mode=hq_mode)
+        if path:
+            # Heavy blend keeps original geometry (Lightning alone invents houses)
+            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.32)
+            path = _finalize_ai(path, 0.55)
+            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
+            return path, "cloudflare", notes
+        notes.append(f"cloudflare: {cf_err or 'request failed'}")
+        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
+    else:
+        notes.append(
+            "cloudflare: skipped — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN "
+            "and ENABLE_CLOUDFLARE_REDESIGN=true"
+        )
+
+    # 3) Optional Replicate Nano Banana / img2img (paid)
     if has_replicate and settings.enable_nano_banana:
         from app.services.replicate_nano_banana import generate_nano_banana_redesign
 
-        logger.info("REDESIGN try nano_banana")
+        logger.info("REDESIGN try replicate_nano_banana")
         path, err = await generate_nano_banana_redesign(
             source_path,
             prompt,
@@ -101,8 +154,6 @@ async def generate_redesign(
             return path, "nano_banana", notes
         notes.append(f"nano_banana: {err or 'failed'}")
         logger.warning("REDESIGN fail nano_banana err=%s", err)
-    else:
-        notes.append("nano_banana: skipped (token missing or ENABLE_NANO_BANANA=false)")
 
     if has_replicate and settings.enable_replicate_img2img:
         from app.services.replicate_img2img import generate_replicate_img2img_redesign
@@ -115,9 +166,6 @@ async def generate_redesign(
             logger.info("REDESIGN ok engine=replicate_img2img path=%s", path)
             return path, "replicate_img2img", notes
         notes.append(f"replicate_img2img: {err or 'failed'}")
-        logger.warning("REDESIGN fail replicate_img2img err=%s", err)
-    else:
-        notes.append("replicate_img2img: skipped (token missing or ENABLE_REPLICATE_IMG2IMG=false)")
 
     if has_replicate and settings.enable_replicate_controlnet:
         from app.services.replicate_controlnet import generate_replicate_controlnet_redesign
@@ -125,94 +173,26 @@ async def generate_redesign(
         logger.info("REDESIGN try replicate_controlnet")
         path, err = await generate_replicate_controlnet_redesign(source_path, prompt)
         if path:
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.55 if hq_mode else 0.45)
+            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.5)
             path = _finalize_ai(path, 0.65)
             logger.info("REDESIGN ok engine=replicate_controlnet path=%s", path)
             return path, "replicate_controlnet", notes
         notes.append(f"replicate_controlnet: {err or 'failed'}")
-        logger.warning("REDESIGN fail replicate_controlnet err=%s", err)
-    else:
-        notes.append("replicate_controlnet: skipped (REPLICATE_API_TOKEN missing or disabled)")
 
-    if settings.enable_fal_controlnet and (settings.fal_key or "").strip():
-        from app.services.fal_controlnet import generate_fal_controlnet_redesign
-
-        logger.info("REDESIGN try fal_controlnet")
-        path = await generate_fal_controlnet_redesign(source_path, prompt)
-        if path:
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.5)
-            path = _finalize_ai(path, 0.65)
-            logger.info("REDESIGN ok engine=fal_controlnet path=%s", path)
-            return path, "fal_controlnet", notes
-        notes.append("fal_controlnet: request failed (403/credits)")
-        logger.warning("REDESIGN fail fal_controlnet")
-    else:
-        notes.append("fal_controlnet: skipped (FAL_KEY missing or disabled)")
-
-    # Guaranteed: selected materials on each region polygon
+    # 4) Guaranteed region materials / photo edit
     if material_guide_rel:
         logger.info("REDESIGN ok engine=region_materials path=%s", material_guide_rel)
         return material_guide_rel, "region_materials", notes
 
-    logger.info("REDESIGN try photo_edit")
     path = _photoreal_photo_edit(source_path, prompt)
     if path:
         logger.info("REDESIGN ok engine=photo_edit path=%s", path)
         return path, "photo_edit", notes
 
-    if (
-        settings.enable_cloudflare_redesign
-        and settings.cloudflare_account_id
-        and settings.cloudflare_api_token
-    ):
-        logger.info("REDESIGN try cloudflare hq=%s", hq_mode)
-        path, cf_err = await _cloudflare_img2img(source_path, prompt, hq_mode=hq_mode)
-        if path:
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.35)
-            path = _finalize_ai(path, 0.5)
-            logger.info("REDESIGN ok engine=cloudflare path=%s", path)
-            return path, "cloudflare", notes
-        notes.append(f"cloudflare: {cf_err or 'request failed'}")
-        logger.warning("REDESIGN fail cloudflare err=%s", cf_err)
-    else:
-        notes.append(
-            "cloudflare: skipped (ENABLE_CLOUDFLARE_REDESIGN=false — lightning txt2img looks cartoonish)"
-        )
-
-    if (settings.hf_token or "").strip() and settings.enable_hf_img2img:
-        from app.services.hf_img2img import generate_hf_img2img_redesign
-
-        logger.info("REDESIGN try hf_img2img")
-        path, err = await generate_hf_img2img_redesign(source_path, prompt, hq_mode=hq_mode)
-        if path:
-            path = _blend_ai_file_onto_photo(source_path, path, ai_weight=0.45)
-            path = _finalize_ai(path, 0.55)
-            logger.info("REDESIGN ok engine=hf_img2img path=%s", path)
-            return path, "hf_img2img", notes
-        notes.append(f"hf_img2img: {err or 'failed'}")
-        logger.warning("REDESIGN fail hf_img2img err=%s", err)
-    else:
-        notes.append("hf_img2img: skipped (HF_TOKEN missing or ENABLE_HF_IMG2IMG=false)")
-
-    if hq_mode and settings.enable_gemini_hq and settings.gemini_api_key:
-        logger.info("REDESIGN try gemini_hq")
-        path = await _gemini_hq(source_path, prompt)
-        if path:
-            path = _finalize_ai(path, 0.7)
-            logger.info("REDESIGN ok engine=gemini_hq path=%s", path)
-            return path, "gemini_hq", notes
-        notes.append("gemini_hq: no image in response")
-        logger.warning("REDESIGN fail gemini_hq")
-
     if settings.allow_local_redesign_fallback:
-        path = (
-            material_guide_rel
-            or _photoreal_photo_edit(source_path, prompt)
-            or _local_fallback_redesign(source_path, prompt)
-        )
-        engine = "region_materials" if path == material_guide_rel else "photo_edit"
+        path = _local_fallback_redesign(source_path, prompt)
         logger.warning("REDESIGN local_fallback path=%s notes=%s", path, notes)
-        return path, engine, notes
+        return path, "photo_edit", notes
 
     logger.error("REDESIGN unavailable notes=%s", notes)
     raise RedesignUnavailableError(notes)
@@ -380,26 +360,27 @@ async def _cloudflare_img2img(
         image_b64 = base64.b64encode(buf.getvalue()).decode()
 
         num_steps = 8 if hq_mode else 6
-        strength = 0.38 if hq_mode else 0.32
         photo_prompt = (
-            f"{prompt} Photorealistic photograph of the same house, real materials, natural daylight."
+            f"{prompt} "
+            "Photorealistic edit of THIS exact house photo — same architecture and camera. "
+            "Only change facade materials. Not a cartoon, not a new building."
         )
 
-        # Prefer img2img; txt2img last (cartoonish)
+        # Prefer image-conditioned; txt2img last (and caller blends onto photo)
         payloads = [
             {
                 "prompt": photo_prompt,
                 "negative_prompt": _CARTOON_NEGATIVE,
                 "image_b64": image_b64,
-                "strength": strength,
+                "strength": 0.35 if hq_mode else 0.28,
                 "num_steps": num_steps,
-                "guidance": 6.0,
+                "guidance": 5.5,
             },
             {
                 "prompt": photo_prompt,
                 "negative_prompt": _CARTOON_NEGATIVE,
                 "num_steps": num_steps,
-                "guidance": 6.0,
+                "guidance": 5.5,
                 "width": img.size[0],
                 "height": img.size[1],
             },

@@ -19,12 +19,12 @@ from app.services.segformer import StructureDetectError, _mask_to_regions
 logger = logging.getLogger(__name__)
 
 _PROMPT_MAP = [
-    ("main wall of the house facade", RegionType.main_wall.value, "Main wall"),
-    ("window", RegionType.window.value, "Window"),
-    ("door entrance", RegionType.gate.value, "Door / gate"),
-    ("balcony", RegionType.balcony.value, "Balcony"),
+    ("building facade wall", RegionType.main_wall.value, "Main wall"),
+    ("house window", RegionType.window.value, "Window"),
+    ("front door", RegionType.gate.value, "Door / gate"),
+    ("balcony railing", RegionType.balcony.value, "Balcony"),
     ("roof edge", RegionType.roof_edge.value, "Roof edge"),
-    ("railing", RegionType.railing.value, "Railing"),
+    ("metal railing", RegionType.railing.value, "Railing"),
     ("pillar column", RegionType.pillar.value, "Pillar"),
 ]
 
@@ -37,16 +37,19 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
             "SegFormer failed and REPLICATE_API_TOKEN is not set for Grounded-SAM backup."
         )
 
+    detect_edge = int(getattr(settings, "detect_max_edge", 0) or 1024)
     img = Image.open(image_path).convert("RGB")
-    img.thumbnail((768, 768))
+    img.thumbnail((detect_edge, detect_edge))
     width, height = img.size
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
+    img.save(buf, format="JPEG", quality=90)
     data_uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
     # Combined prompt (Grounded-SAM style)
     prompt = " . ".join(p[0] for p in _PROMPT_MAP)
     model = (settings.replicate_seg_model or "schananas/grounded_sam").strip()
+    box_thr = float(getattr(settings, "grounded_box_threshold", 0.35) or 0.35)
+    text_thr = float(getattr(settings, "grounded_text_threshold", 0.25) or 0.25)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -56,9 +59,9 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
         "input": {
             "image": data_uri,
             "prompt": prompt,
-            "negative_prompt": "tree, person, car, sky, ground only",
-            "box_threshold": 0.25,
-            "text_threshold": 0.20,
+            "negative_prompt": "tree, sky, person, car, ground, road, bush, plant only",
+            "box_threshold": box_thr,
+            "text_threshold": text_thr,
         }
     }
 
@@ -69,10 +72,12 @@ def _detect_grounded_sync(image_path: Path) -> list[dict]:
             json=payload,
         )
         if resp.status_code >= 400:
-            # Alternate common grounded-sam schema
+            # Alternate common grounded-sam schema (keep thresholds)
             payload["input"] = {
                 "image": data_uri,
                 "query": prompt,
+                "box_threshold": box_thr,
+                "text_threshold": text_thr,
             }
             resp = client.post(
                 f"https://api.replicate.com/v1/models/{model}/predictions",
@@ -172,9 +177,15 @@ def _parse_grounded_output(output, width: int, height: int, client: httpx.Client
         label = ""
         if isinstance(labels, list) and i < len(labels):
             label = str(labels[i])
-        rtype = _label_to_type(label) or RegionType.main_wall.value
+        rtype = _label_to_type(label)
+        if not rtype:
+            # Skip unlabeled masks — defaulting to wall floods false facades
+            logger.info("DETECT grounded skip unlabeled mask i=%s label=%r", i, label)
+            continue
         pretty = label.replace("_", " ").title() if label else "Region"
-        regions.extend(_mask_to_regions(arr, rtype, pretty, 0.7))
+        for reg in _mask_to_regions(arr, rtype, pretty, 0.7):
+            reg["source"] = "grounded_sam"
+            regions.append(reg)
     return regions
 
 

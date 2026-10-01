@@ -939,7 +939,7 @@ export default function ProjectWorkspacePage() {
           title="Renovation visualization"
           description={
             activeDesign
-              ? `Generate a redesign that applies each material you selected onto its region (Nano Banana 2 + region material map).`
+              ? `Free redesign with Pollinations Nano Banana (reference photo), then Cloudflare Lightning if needed — applies materials on “${activeDesign.name}”.`
               : "Generate a photoreal redesigned view of your house using your selected materials."
           }
           actions={
@@ -948,7 +948,7 @@ export default function ProjectWorkspacePage() {
                 className="btn-outline"
                 onClick={() => runVisualize(true)}
                 disabled={busy}
-                title="Nano Banana 2 at 2K resolution"
+                title="Higher-res Pollinations / Cloudflare render"
               >
                 <Icon name="sparkles" /> HQ render
               </button>
@@ -976,11 +976,17 @@ export default function ProjectWorkspacePage() {
               <figcaption className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Badge tone="brand">After</Badge> {activeDesign ? activeDesign.name : "Redesign"}
                 {activeDesign?.hq_mode && <Badge tone="violet">HQ</Badge>}
+                {activeDesign?.prompt_used?.includes("[pollinations_nanobanana]") && (
+                  <Badge tone="brand">Pollinations Nano Banana</Badge>
+                )}
+                {activeDesign?.prompt_used?.includes("[cloudflare]") && (
+                  <Badge tone="brand">Cloudflare Lightning</Badge>
+                )}
                 {activeDesign?.prompt_used?.includes("[region_materials]") && (
                   <Badge tone="brand">Region materials</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[nano_banana]") && (
-                  <Badge tone="brand">Nano Banana 2</Badge>
+                  <Badge tone="brand">Replicate Nano Banana</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[replicate_img2img]") && (
                   <Badge tone="brand">Replicate img2img</Badge>
@@ -999,9 +1005,6 @@ export default function ProjectWorkspacePage() {
                 )}
                 {activeDesign?.prompt_used?.includes("[hf_img2img]") && (
                   <Badge tone="neutral">Hugging Face</Badge>
-                )}
-                {activeDesign?.prompt_used?.includes("[cloudflare]") && (
-                  <Badge tone="brand">Cloudflare (free)</Badge>
                 )}
                 {activeDesign?.prompt_used?.includes("[local_fallback]") && (
                   <Badge tone="warning">Local preview (not AI)</Badge>

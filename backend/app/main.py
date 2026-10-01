@@ -26,6 +26,7 @@ for _name in (
     "app.services.replicate_controlnet",
     "app.services.replicate_img2img",
     "app.services.replicate_nano_banana",
+    "app.services.pollinations_nanobanana",
 ):
     logging.getLogger(_name).setLevel(logging.INFO)
 
